@@ -1,0 +1,30 @@
+#!/usr/bin/env bash
+# Usa o microfone do celular como mic do PC, via USB (adb).
+# O audio cai no no virtual "phone_mic" -> selecione "Celular (mic via USB)"
+# como entrada no app que for usar.
+#
+# Uso:  phone-mic [buffer_ms] [fonte]
+#   buffer_ms  default 40. Menor = menos delay, mais risco de picotar.
+#   fonte      default "mic" (verificada: mean -31/-27 dB, max -10/-9 dB).
+#              Alternativas: mic-voice-communication (cancelamento de eco/AGC),
+#              mic-unprocessed, mic-camcorder, mic-voice-recognition
+set -euo pipefail
+
+BUF="${1:-40}"
+SRC="${2:-mic}"
+
+if ! adb get-state >/dev/null 2>&1; then
+    echo "erro: nenhum celular em modo device no adb. Confira o cabo e a" >&2
+    echo "       autorizacao de depuracao USB (adb devices)." >&2
+    exit 1
+fi
+
+echo "mic do celular -> phone_mic  (buffer ${BUF}ms, fonte ${SRC})"
+echo "selecione 'Celular (mic via USB)' como entrada. Ctrl-C para parar."
+
+exec env PIPEWIRE_PROPS="{ target.object = phone_mic_in, node.name = phone-mic-bridge }" \
+    scrcpy \
+        --no-video \
+        --no-window \
+        --audio-source="$SRC" \
+        --audio-buffer="$BUF"

@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# Manda o audio do PC pro celular pelo cabo USB. No celular, o app
+# "Simple Protocol Player" (F-Droid) toca o stream e voce ouve no fone
+# Bluetooth pareado NO CELULAR.
+#
+# No celular, configure o app assim:
+#   Host 127.0.0.1   Port 12345   Rate 48000   Channels 2   Format 16 bit
+#
+# Uso:  phone-speaker
+# Ctrl-C devolve o audio pro HDMI.
+set -euo pipefail
+
+PORT=12345
+HDMI=alsa_output.pci-0000_01_00.1.hdmi-stereo
+PHONE=phone_speaker
+
+if ! adb get-state >/dev/null 2>&1; then
+    echo "erro: nenhum celular em modo device no adb (confira cabo/autorizacao)." >&2
+    exit 1
+fi
+
+if ! ss -tln 2>/dev/null | grep -q "127.0.0.1:$PORT"; then
+    echo "erro: PipeWire nao esta escutando em 127.0.0.1:$PORT." >&2
+    echo "       confira ~/.config/pipewire/pipewire.conf.d/21-phone-speaker.conf" >&2
+    exit 1
+fi
+
+restore() {
+    echo
+    echo "devolvendo audio pro HDMI..."
+    pactl set-default-sink "$HDMI" 2>/dev/null || true
+    for i in $(pactl list short sink-inputs 2>/dev/null | cut -f1); do
+        pactl move-sink-input "$i" "$HDMI" 2>/dev/null || true
+    done
+    adb reverse --remove "tcp:$PORT" 2>/dev/null || true
+}
+trap restore EXIT INT TERM
+
+# tunela a porta pelo cabo: localhost do celular -> localhost do PC
+adb reverse "tcp:$PORT" "tcp:$PORT" >/dev/null
+
+# manda tudo pro celular
+pactl set-default-sink "$PHONE"
+for i in $(pactl list short sink-inputs 2>/dev/null | cut -f1); do
+    pactl move-sink-input "$i" "$PHONE" 2>/dev/null || true
+done
+
+echo "audio do PC -> celular (porta $PORT via USB)"
+echo "abra o Simple Protocol Player no celular: 127.0.0.1 : $PORT, 48000, 2ch, 16 bit"
+echo "Ctrl-C para voltar pro HDMI."
+
+# segura o script vivo pro trap funcionar no Ctrl-C
+while sleep 3600; do :; done

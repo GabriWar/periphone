@@ -1,0 +1,144 @@
+#!/usr/bin/env bash
+# Liga o app USB Audio Bridge no celular e roteia o audio do PC por ele.
+#   saida: PC -> celular (-> fone BT)     porta 12345
+#   mic:   celular -> PC                  porta 12346
+#
+# Uso:  phone-bridge [buffer_ms] [fonte_mic]
+#   buffer_ms  opcional (10..200); sem ele vale o que estiver salvo no app. Menor = menos delay, mais risco de picotar.
+#   fonte_mic  opcional; id do MediaRecorder.AudioSource: 1=mic (default), 7=voz (cancela
+#              eco/ruido), 9=sem processamento, 6=reconhecimento, 5=camcorder
+#
+# Portas: lidas dos configs do PipeWire (21/22). Pra trocar: phone-bridge ports <saida> <mic>
+#
+# O celular precisa estar desbloqueado ao iniciar (o Android so libera o mic
+# pra app em primeiro plano). Depois pode apagar a tela.
+# Ctrl-C (ou 'phone-bridge stop') devolve o audio pro HDMI e fecha o app.
+set -euo pipefail
+
+PIDFILE="${XDG_RUNTIME_DIR:-$HOME/.cache}/phone-bridge.pid"
+
+# phone-bridge stop : encerra a ponte (o processo se chama "bash", pkill -x nao acha)
+if [ "${1:-}" = "stop" ]; then
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        kill "$(cat "$PIDFILE")" && echo "ponte encerrada."
+    else
+        echo "nenhuma ponte rodando."
+    fi
+    exit 0
+fi
+CONF_DIR="$HOME/.config/pipewire/pipewire.conf.d"
+SPK_CONF="$CONF_DIR/21-phone-speaker.conf"
+MIC_CONF="$CONF_DIR/22-phone-mic-server.conf"
+
+# phone-bridge ports <saida> <mic> : troca as portas (configs do PipeWire = fonte da verdade)
+if [ "${1:-}" = "ports" ]; then
+    if [ $# -ne 3 ]; then echo "uso: phone-bridge ports <porta_saida> <porta_mic>" >&2; exit 1; fi
+    for p in "$2" "$3"; do
+        if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1024 ] || [ "$p" -gt 65535 ]; then
+            echo "erro: porta invalida: $p (use 1024..65535)" >&2; exit 1
+        fi
+    done
+    [ "$2" != "$3" ] || { echo "erro: as duas portas tem que ser diferentes" >&2; exit 1; }
+    cur_spk=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$SPK_CONF" | head -1)
+    cur_mic=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$MIC_CONF" | head -1)
+    for p in "$2" "$3"; do
+        if [ "$p" != "$cur_spk" ] && [ "$p" != "$cur_mic" ] && ss -Htln "( sport = :$p )" | grep -q .; then
+            echo "erro: porta $p ja esta em uso:" >&2; ss -Htlnp "( sport = :$p )" >&2; exit 1
+        fi
+    done
+    sed -i "s|tcp:127\.0\.0\.1:[0-9]*|tcp:127.0.0.1:$2|" "$SPK_CONF"
+    sed -i "s|tcp:127\.0\.0\.1:[0-9]*|tcp:127.0.0.1:$3|" "$MIC_CONF"
+    systemctl --user restart pipewire pipewire-pulse wireplumber
+    echo "portas: saida $2, mic $3 (PipeWire reiniciado). Rode phone-bridge de novo."
+    exit 0
+fi
+
+# nao deixa subir duas pontes ao mesmo tempo
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    echo "ja existe uma ponte rodando (pid $(cat "$PIDFILE")). Use: phone-bridge stop" >&2
+    exit 1
+fi
+echo $$ > "$PIDFILE"
+
+PKG=dev.gabriwar.usbaudio
+SPK_PORT=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$SPK_CONF" 2>/dev/null | head -1)
+MIC_PORT=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$MIC_CONF" 2>/dev/null | head -1)
+SPK_PORT=${SPK_PORT:-12345}
+MIC_PORT=${MIC_PORT:-12346}
+BUF="${1:-}"   # vazio = usa o que estiver salvo no app
+SRC="${2:-}"
+HDMI=alsa_output.pci-0000_01_00.1.hdmi-stereo
+
+die() { echo "erro: $*" >&2; exit 1; }
+
+adb get-state >/dev/null 2>&1 || die "nenhum celular em modo device no adb (cabo / depuracao USB)."
+adb shell pm list packages 2>/dev/null | grep -q "$PKG" \
+    || die "app nao instalado. Rode: adb install -r ~/Projects/usb-audio-bridge/usb-audio-bridge.apk"
+for p in $SPK_PORT $MIC_PORT; do
+    ss -tln 2>/dev/null | grep -q "127.0.0.1:$p" \
+        || die "PipeWire nao esta escutando em 127.0.0.1:$p (confira ~/.config/pipewire/pipewire.conf.d/21 e 22)."
+done
+
+sink_idx() { pactl list short sinks | awk -v n="$1" '$2==n {print $1}'; }
+move_inputs() {   # move_inputs <de_sink> <para_sink>: so o que esta no sink de origem
+    local from to; from=$(sink_idx "$1"); to="$2"
+    [ -n "$from" ] || return 0
+    pactl list short sink-inputs | awk -v f="$from" '$2==f {print $1}' | while read -r id; do
+        pactl move-sink-input "$id" "$to" 2>/dev/null || true
+    done
+}
+
+restore() {
+    echo
+    echo "devolvendo audio pro HDMI e fechando o app..."
+    pactl set-default-sink "$HDMI" 2>/dev/null || true
+    move_inputs phone_speaker "$HDMI"
+    adb shell am force-stop "$PKG" 2>/dev/null || true
+    adb reverse --remove "tcp:$SPK_PORT" 2>/dev/null || true
+    adb reverse --remove "tcp:$MIC_PORT" 2>/dev/null || true
+}
+trap 'rm -f "$PIDFILE"; restore' EXIT
+trap 'exit 0' INT TERM      # sem isso o TERM restaurava e o script seguia vivo
+
+# o app antigo tambem conectaria na 12345 e dobraria o stream
+adb shell am force-stop com.kaytat.simpleprotocolplayer 2>/dev/null || true
+adb shell am force-stop "$PKG" 2>/dev/null || true
+
+adb reverse "tcp:$SPK_PORT" "tcp:$SPK_PORT" >/dev/null
+adb reverse "tcp:$MIC_PORT" "tcp:$MIC_PORT" >/dev/null
+adb shell pm grant "$PKG" android.permission.RECORD_AUDIO 2>/dev/null || true
+adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+adb shell input keyevent KEYCODE_WAKEUP 2>/dev/null || true
+
+extras=(--ez autostart true --ez spk true --ez mic true --ei spkport "$SPK_PORT" --ei micport "$MIC_PORT")
+[ -n "$BUF" ] && extras+=(--ei buf "$BUF")
+[ -n "$SRC" ] && extras+=(--ei src "$SRC")
+adb shell am start -n "$PKG/.MainActivity" "${extras[@]}" >/dev/null
+
+echo "esperando o app conectar nas duas portas..."
+spk=0; mic=0
+for _ in $(seq 1 30); do
+    [ "$(ss -Htn state established "( sport = :$SPK_PORT )" 2>/dev/null | wc -l)" -gt 0 ] && spk=1 || spk=0
+    [ "$(ss -Htn state established "( sport = :$MIC_PORT )" 2>/dev/null | wc -l)" -gt 0 ] && mic=1 || mic=0
+    [ "$spk" = 1 ] && [ "$mic" = 1 ] && break
+    sleep 0.5
+done
+[ "$spk" = 1 ] && echo "  saida: CONECTADA" || echo "  saida: nao conectou (celular desbloqueado?)"
+[ "$mic" = 1 ] && echo "  mic:   CONECTADO" || echo "  mic:   nao conectou (permissao de microfone?)"
+
+pactl set-default-sink phone_speaker
+pactl set-default-source phone_mic
+move_inputs "$HDMI" phone_speaker
+
+echo
+echo "audio do PC -> celular, mic do celular -> PC   (buffer/fonte: ${BUF:-do app}/${SRC:-do app})"
+echo "entrada nos apps/jogos: 'Celular (mic via USB)'. Ctrl-C para encerrar."
+
+# acompanha: avisa quando cair ou voltar
+last=""
+while sleep 2; do
+    s=$(ss -Htn state established "( sport = :$SPK_PORT )" 2>/dev/null | wc -l)
+    m=$(ss -Htn state established "( sport = :$MIC_PORT )" 2>/dev/null | wc -l)
+    now="saida=$([ "$s" -gt 0 ] && echo on || echo OFF) mic=$([ "$m" -gt 0 ] && echo on || echo OFF)"
+    [ "$now" != "$last" ] && { echo "[$(date +%H:%M:%S)] $now"; last="$now"; }
+done
