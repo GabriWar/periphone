@@ -151,6 +151,9 @@ class Decoder:
             self.proc.kill()
 
 
+MAX_PACKET = 8 << 20   # one H.264 frame; even 20 Mbps keyframes are far below this
+
+
 def serve(args):
     srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -179,9 +182,14 @@ def serve(args):
         try:
             while True:
                 kind, length = struct.unpack(">BI", recv_exact(conn, 5))
+                if length > MAX_PACKET:
+                    raise ValueError(f"packet too big ({length} bytes)")
                 payload = recv_exact(conn, length)
                 if kind == PKT_CONFIG:
                     w, h, fps, rot, flags = struct.unpack(">HHHHB", payload[:9])
+                    if not (16 <= w <= 1920 and 16 <= h <= 1920 and 1 <= fps <= 120
+                            and rot in (0, 90, 180, 270)):
+                        raise ValueError(f"bad config {w}x{h} {fps} fps rotation {rot}")
                     rw, rh = (h, w) if rot in (90, 270) else (w, h)
                     if sink is not None and not sink.alive:   # writer died: reopen the device
                         sink.close()
@@ -199,6 +207,8 @@ def serve(args):
                     dec.feed(payload)
         except (EOFError, ConnectionError, OSError):
             pass
+        except (ValueError, struct.error) as e:
+            log(f"dropping connection: {e}")
         finally:
             if dec:
                 dec.close()
