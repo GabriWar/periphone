@@ -1,0 +1,230 @@
+#!/usr/bin/env python3
+"""phone-cam: receives the phone camera from the USB Audio Bridge app and feeds a
+v4l2loopback webcam, so any app (browser, Discord, OBS, Zoom...) can use it.
+
+    phone -> adb reverse -> 127.0.0.1:PORT -> ffmpeg (decode, rotate, fit) -> /dev/videoN
+
+The webcam device is held open for the whole session (black frames while the phone is
+not sending), so apps don't lose the camera when you switch front/back or rotate.
+
+Usage: phone-cam [--port 12347] [--device /dev/videoN] [--size 1280x720]
+Normally started by phone-bridge.
+"""
+import argparse
+import glob
+import os
+import shutil
+import signal
+import socket
+import struct
+import subprocess
+import sys
+import threading
+import time
+
+PKT_CONFIG, PKT_DATA = 1, 2
+
+
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] camera: {msg}", flush=True)
+
+
+def find_loopback():
+    """First v4l2loopback device (they live under /sys/devices/virtual)."""
+    for path in sorted(glob.glob("/sys/devices/virtual/video4linux/video*")):
+        dev = "/dev/" + os.path.basename(path)
+        if os.path.exists(dev):
+            return dev
+    return None
+
+
+def recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError
+        buf += chunk
+    return bytes(buf)
+
+
+class Sink:
+    """ffmpeg holding the v4l2 device open, fed raw yuv420p frames of a fixed size."""
+
+    def __init__(self, device, w, h, fps):
+        self.w, self.h = w, h
+        self.frame_size = w * h * 3 // 2
+        self.black = bytes([16]) * (w * h) + bytes([128]) * (w * h // 2)
+        self.lock = threading.Lock()
+        self.last_frame = 0.0
+        fmt = os.environ.get("PHONE_CAM_SINK_FORMAT", "v4l2")   # tests use 'rawvideo' + a file
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-s", f"{w}x{h}", "-r", str(fps), "-i", "pipe:0",
+             "-fps_mode", "passthrough", "-f", fmt, "-pix_fmt", "yuv420p", device],
+            stdin=subprocess.PIPE, bufsize=0)
+        self.alive = True
+        threading.Thread(target=self._idle, daemon=True).start()
+
+    def write(self, frame, real=True):
+        with self.lock:
+            if not self.alive:
+                return
+            try:
+                self.proc.stdin.write(frame)
+            except (BrokenPipeError, OSError):
+                self.alive = False
+                log("the webcam writer (ffmpeg) died")
+                return
+            if real:
+                self.last_frame = time.monotonic()
+
+    def _idle(self):
+        # keep consumers alive with black frames (5 fps) while nothing comes from the phone
+        while self.alive:
+            time.sleep(0.2)
+            if time.monotonic() - self.last_frame > 1.0:
+                self.write(self.black, real=False)
+
+    def close(self):
+        self.alive = False
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+class Decoder:
+    """ffmpeg decoding one H.264 stream (one CONFIG) into frames that fit the sink."""
+
+    def __init__(self, sink, w, h, fps, rotation, mirror):
+        self.sink = sink
+        filters = {90: ["transpose=clock"], 180: ["hflip", "vflip"], 270: ["transpose=cclock"]}.get(rotation, [])
+        if mirror:
+            filters.append("hflip")
+        W, H = sink.w, sink.h
+        filters += [f"scale={W}:{H}:force_original_aspect_ratio=decrease",
+                    f"pad={W}:{H}:(ow-iw)/2:(oh-ih)/2", "format=yuv420p"]
+        self.proc = subprocess.Popen(
+            ["ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+             # no probing, no frame threading, no reorder guessing: a frame goes out as soon as
+             # it's decoded (measured: ~1 frame behind instead of 14 with the defaults).
+             # Not -fflags nobuffer: with ffmpeg 8 it makes the tiny probe fail.
+             "-flags", "low_delay", "-strict", "experimental",
+             "-probesize", "32", "-analyzeduration", "0", "-fpsprobesize", "0",
+             "-f", "h264", "-framerate", str(fps), "-i", "pipe:0",
+             "-vf", ",".join(filters), "-fps_mode", "passthrough",
+             "-f", "rawvideo", "-pix_fmt", "yuv420p", "-flush_packets", "1", "pipe:1"],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, bufsize=0)
+        threading.Thread(target=self._pump, daemon=True).start()
+
+    def _pump(self):
+        n = self.sink.frame_size
+        out = self.proc.stdout
+        while True:
+            buf = bytearray()
+            while len(buf) < n:
+                chunk = out.read(n - len(buf))
+                if not chunk:
+                    return
+                buf += chunk
+            self.sink.write(bytes(buf))
+
+    def feed(self, data):
+        try:
+            self.proc.stdin.write(data)
+        except (BrokenPipeError, OSError):
+            pass
+
+    def close(self):
+        try:
+            self.proc.stdin.close()
+        except OSError:
+            pass
+        try:
+            self.proc.wait(timeout=1)
+        except subprocess.TimeoutExpired:
+            self.proc.kill()
+
+
+def serve(args):
+    srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+    try:
+        srv.bind(("127.0.0.1", args.port))   # loopback only: nothing exposed on the network
+    except OSError as e:
+        sys.exit(f"phone-cam: can't listen on 127.0.0.1:{args.port}: {e}")
+    srv.listen(1)
+    log(f"waiting for the phone on 127.0.0.1:{args.port} -> {args.device}")
+
+    sink = None
+    fixed = None
+    if args.size:
+        try:
+            w, h = (int(v) for v in args.size.lower().split("x"))
+        except ValueError:
+            sys.exit(f"phone-cam: bad --size {args.size!r}, expected e.g. 1280x720")
+        w, h = w // 2 * 2, h // 2 * 2   # yuv420p needs even sizes
+        fixed = (w, h)
+        sink = Sink(args.device, w, h, 30)
+
+    while True:
+        conn, _ = srv.accept()
+        conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        dec = None
+        try:
+            while True:
+                kind, length = struct.unpack(">BI", recv_exact(conn, 5))
+                payload = recv_exact(conn, length)
+                if kind == PKT_CONFIG:
+                    w, h, fps, rot, flags = struct.unpack(">HHHHB", payload[:9])
+                    rw, rh = (h, w) if rot in (90, 270) else (w, h)
+                    if sink is not None and not sink.alive:   # writer died: reopen the device
+                        sink.close()
+                        sink = None
+                    if sink is None:
+                        # webcams are landscape: a portrait stream gets pillarboxed
+                        sw, sh = fixed or (max(rw, rh), min(rw, rh))
+                        sink = Sink(args.device, sw, sh, fps)
+                        log(f"webcam {args.device} open at {sw}x{sh}")
+                    if dec:
+                        dec.close()
+                    dec = Decoder(sink, w, h, fps, rot, bool(flags & 1))
+                    log(f"phone stream {w}x{h} {fps} fps, rotation {rot}{', mirrored' if flags & 1 else ''}")
+                elif kind == PKT_DATA and dec:
+                    dec.feed(payload)
+        except (EOFError, ConnectionError, OSError):
+            pass
+        finally:
+            if dec:
+                dec.close()
+            conn.close()
+            log("phone disconnected")
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--port", type=int, default=12347)
+    ap.add_argument("--device", help="v4l2loopback device (default: the first one found)")
+    ap.add_argument("--size", help="fixed webcam size, e.g. 1280x720 (default: the phone's first stream)")
+    args = ap.parse_args()
+
+    if not shutil.which("ffmpeg"):
+        sys.exit("phone-cam: ffmpeg not found (install it: sudo pacman -S ffmpeg)")
+    args.device = args.device or find_loopback()
+    if not args.device:
+        sys.exit("phone-cam: no v4l2loopback device. Load it with:\n"
+                 "  sudo modprobe v4l2loopback devices=1 exclusive_caps=1 card_label=\"Phone Camera\"")
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    try:
+        serve(args)
+    except KeyboardInterrupt:
+        pass
+
+
+if __name__ == "__main__":
+    main()

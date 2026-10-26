@@ -1,6 +1,6 @@
 package dev.gabriwar.usbaudio;
 
-/** Anel de amostras mono (16 bit) alimentado pelos pipes de audio e lido pela tela. */
+/** Ring of mono 16-bit samples, fed by the audio pipes and read by the screen. */
 final class SpectrumTap {
     static final int SIZE = 16384;
     private static final int MASK = SIZE - 1;
@@ -16,7 +16,7 @@ final class SpectrumTap {
         wp = p;
     }
 
-    /** Estereo S16LE -> mono (media dos canais). */
+    /** Stereo S16LE -> mono (average of the channels). */
     void pushStereo(byte[] b, int len) {
         long p = wp;
         for (int i = 0; i + 3 < len; i += 4) {

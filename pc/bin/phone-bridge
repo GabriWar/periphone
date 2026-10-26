@@ -1,86 +1,145 @@
 #!/usr/bin/env bash
-# Liga o app USB Audio Bridge no celular e roteia o audio do PC por ele.
-#   saida: PC -> celular (-> fone BT)     porta 12345
-#   mic:   celular -> PC                  porta 12346
+# Starts the USB Audio Bridge app on the phone and routes the PC's audio (and camera) through it.
+#   output: PC -> phone (-> headphones)    port 12345
+#   mic:    phone -> PC                    port 12346
+#   camera: phone -> PC webcam             port 12347 (needs v4l2loopback + ffmpeg)
 #
-# Uso:  phone-bridge [buffer_ms] [fonte_mic]
-#   buffer_ms  opcional (10..200); sem ele vale o que estiver salvo no app. Menor = menos delay, mais risco de picotar.
-#   fonte_mic  opcional; id do MediaRecorder.AudioSource: 1=mic (default), 7=voz (cancela
-#              eco/ruido), 9=sem processamento, 6=reconhecimento, 5=camcorder
+# Usage: phone-bridge [options]
+#   -b, --buffer MS     output buffer 10..200 ms (default: what's saved in the app).
+#                       Smaller = less delay, more risk of crackling.
+#   -m, --mic-mode N    MediaRecorder.AudioSource id: 1=standard (default), 7=voice call
+#                       (echo/noise cancelling), 9=raw, 6=voice recognition, 5=camcorder
+#   -c, --cam [front|back]   also stream the phone camera as a webcam
+#       --no-mic        don't send the phone mic
+#       --no-out        don't play PC audio on the phone
+#   phone-bridge stop                      stop a running bridge
+#   phone-bridge ports <out> <mic> [cam]   change the ports (if the defaults are taken)
 #
-# Portas: lidas dos configs do PipeWire (21/22). Pra trocar: phone-bridge ports <saida> <mic>
-#
-# O celular precisa estar desbloqueado ao iniciar (o Android so libera o mic
-# pra app em primeiro plano). Depois pode apagar a tela.
-# Ctrl-C (ou 'phone-bridge stop') devolve o audio pro HDMI e fecha o app.
+# The phone must be unlocked when starting (Android only gives the mic/camera to an app in
+# the foreground). After that the screen can turn off.
+# Ctrl-C (or 'phone-bridge stop') puts the audio back where it was and closes the app.
 set -euo pipefail
 
+PKG=dev.gabriwar.usbaudio
 PIDFILE="${XDG_RUNTIME_DIR:-$HOME/.cache}/phone-bridge.pid"
-
-# phone-bridge stop : encerra a ponte (o processo se chama "bash", pkill -x nao acha)
-if [ "${1:-}" = "stop" ]; then
-    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-        kill "$(cat "$PIDFILE")" && echo "ponte encerrada."
-    else
-        echo "nenhuma ponte rodando."
-    fi
-    exit 0
-fi
 CONF_DIR="$HOME/.config/pipewire/pipewire.conf.d"
 SPK_CONF="$CONF_DIR/21-phone-speaker.conf"
 MIC_CONF="$CONF_DIR/22-phone-mic-server.conf"
+CAM_PORT_FILE="${XDG_CONFIG_HOME:-$HOME/.config}/phone-bridge/cam-port"
+HERE="$(dirname "$(readlink -f "$0")")"
 
-# phone-bridge ports <saida> <mic> : troca as portas (configs do PipeWire = fonte da verdade)
+die() { echo "error: $*" >&2; exit 1; }
+port_of() { grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$1" 2>/dev/null | head -1 || true; }
+# capture first, then test: 'cmd | grep -q' can fail under pipefail when grep exits early
+listening() { [ -n "$(ss -Htln "( sport = :$1 )" 2>/dev/null)" ]; }
+
+# ---------------------------------------------------------------- phone-bridge stop
+# (the process is called "bash", pkill -x wouldn't find it)
+if [ "${1:-}" = "stop" ]; then
+    if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+        kill "$(cat "$PIDFILE")" && echo "bridge stopped."
+    else
+        echo "no bridge running."
+    fi
+    exit 0
+fi
+
+# ---------------------------------------------------------------- phone-bridge ports
+# The PipeWire configs are the source of truth for the audio ports.
 if [ "${1:-}" = "ports" ]; then
-    if [ $# -ne 3 ]; then echo "uso: phone-bridge ports <porta_saida> <porta_mic>" >&2; exit 1; fi
-    for p in "$2" "$3"; do
+    if [ $# -lt 3 ] || [ $# -gt 4 ]; then die "usage: phone-bridge ports <out_port> <mic_port> [cam_port]"; fi
+    for p in "${@:2}"; do
         if ! [[ "$p" =~ ^[0-9]+$ ]] || [ "$p" -lt 1024 ] || [ "$p" -gt 65535 ]; then
-            echo "erro: porta invalida: $p (use 1024..65535)" >&2; exit 1
+            die "invalid port: $p (use 1024..65535)"
         fi
     done
-    [ "$2" != "$3" ] || { echo "erro: as duas portas tem que ser diferentes" >&2; exit 1; }
-    cur_spk=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$SPK_CONF" | head -1)
-    cur_mic=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$MIC_CONF" | head -1)
-    for p in "$2" "$3"; do
-        if [ "$p" != "$cur_spk" ] && [ "$p" != "$cur_mic" ] && ss -Htln "( sport = :$p )" | grep -q .; then
-            echo "erro: porta $p ja esta em uso:" >&2; ss -Htlnp "( sport = :$p )" >&2; exit 1
+    [ -f "$SPK_CONF" ] && [ -f "$MIC_CONF" ] || die "PipeWire configs not installed (run pc/install.sh)"
+    cur_spk=$(port_of "$SPK_CONF"); cur_mic=$(port_of "$MIC_CONF")
+    cur_cam=$(cat "$CAM_PORT_FILE" 2>/dev/null || echo 12347)
+    new_cam="${4:-$cur_cam}"
+    [ "$(printf '%s\n' "$2" "$3" "$new_cam" | sort -u | wc -l)" -eq 3 ] \
+        || die "the ports must all be different (camera port: $new_cam)"
+    for p in "$2" "$3" ${4:+"$4"}; do
+        if [ "$p" != "$cur_spk" ] && [ "$p" != "$cur_mic" ] && [ "$p" != "$cur_cam" ] && listening "$p"; then
+            echo "error: port $p is already in use:" >&2; ss -Htlnp "( sport = :$p )" >&2; exit 1
         fi
     done
     sed -i "s|tcp:127\.0\.0\.1:[0-9]*|tcp:127.0.0.1:$2|" "$SPK_CONF"
     sed -i "s|tcp:127\.0\.0\.1:[0-9]*|tcp:127.0.0.1:$3|" "$MIC_CONF"
+    if [ -n "${4:-}" ]; then mkdir -p "$(dirname "$CAM_PORT_FILE")"; echo "$4" > "$CAM_PORT_FILE"; fi
     systemctl --user restart pipewire pipewire-pulse wireplumber
-    echo "portas: saida $2, mic $3 (PipeWire reiniciado). Rode phone-bridge de novo."
+    echo "ports: output $2, mic $3${4:+, camera $4} (PipeWire restarted). Run phone-bridge again."
+    echo "Set the same ports in the app if you changed them there (Advanced > Ports)."
     exit 0
 fi
 
-# nao deixa subir duas pontes ao mesmo tempo
-if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
-    echo "ja existe uma ponte rodando (pid $(cat "$PIDFILE")). Use: phone-bridge stop" >&2
-    exit 1
+# ---------------------------------------------------------------- options
+BUF=""; SRC=""; CAM=""; SPK=true; MIC=true
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -b|--buffer)   [ $# -ge 2 ] || die "$1 needs a value"; BUF="$2"; shift ;;
+        -m|--mic-mode) [ $# -ge 2 ] || die "$1 needs a value"; SRC="$2"; shift ;;
+        -c|--cam|--camera)
+            CAM=back
+            if [ "${2:-}" = front ] || [ "${2:-}" = back ]; then CAM="$2"; shift; fi ;;
+        --no-mic) MIC=false ;;
+        --no-out) SPK=false ;;
+        -h|--help) sed -n '2,/^[^#]/{/^#/p}' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        [0-9]*)   # old style: phone-bridge [buffer_ms] [mic_mode]
+            if [ -z "$BUF" ]; then BUF="$1"; else SRC="$1"; fi ;;
+        *) die "unknown option: $1 (see phone-bridge --help)" ;;
+    esac
+    shift
+done
+if [ -n "$BUF" ] && { ! [[ "$BUF" =~ ^[0-9]+$ ]] || [ "$BUF" -lt 10 ] || [ "$BUF" -gt 200 ]; }; then
+    die "buffer must be 10..200 ms"
 fi
-echo $$ > "$PIDFILE"
+if [ -n "$SRC" ] && ! [[ "$SRC" =~ ^[0-9]+$ ]]; then die "mic mode must be a number (see --help)"; fi
 
-PKG=dev.gabriwar.usbaudio
-SPK_PORT=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$SPK_CONF" 2>/dev/null | head -1)
-MIC_PORT=$(grep -oP 'tcp:127\.0\.0\.1:\K[0-9]+' "$MIC_CONF" 2>/dev/null | head -1)
-SPK_PORT=${SPK_PORT:-12345}
-MIC_PORT=${MIC_PORT:-12346}
-BUF="${1:-}"   # vazio = usa o que estiver salvo no app
-SRC="${2:-}"
-HDMI=alsa_output.pci-0000_01_00.1.hdmi-stereo
+# don't run two bridges at once
+if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+    die "a bridge is already running (pid $(cat "$PIDFILE")). Use: phone-bridge stop"
+fi
 
-die() { echo "erro: $*" >&2; exit 1; }
+SPK_PORT=$(port_of "$SPK_CONF"); SPK_PORT=${SPK_PORT:-12345}
+MIC_PORT=$(port_of "$MIC_CONF"); MIC_PORT=${MIC_PORT:-12346}
+CAM_PORT=$(cat "$CAM_PORT_FILE" 2>/dev/null || true); CAM_PORT=${CAM_PORT:-12347}
 
-adb get-state >/dev/null 2>&1 || die "nenhum celular em modo device no adb (cabo / depuracao USB)."
-adb shell pm list packages 2>/dev/null | grep -q "$PKG" \
-    || die "app nao instalado. Rode: adb install -r ~/Projects/usb-audio-bridge/usb-audio-bridge.apk"
+# ---------------------------------------------------------------- checks
+command -v adb >/dev/null || die "adb not found (install android-tools)"
+command -v pactl >/dev/null || die "pactl not found (install libpulse / pipewire-pulse)"
+adb_list=$(adb devices 2>/dev/null || true)
+n_dev=$(awk 'NR>1 && $2=="device"' <<<"$adb_list" | wc -l)
+if [ "$n_dev" -eq 0 ]; then
+    if grep -q unauthorized <<<"$adb_list"; then
+        die "the phone hasn't authorized this PC yet: unlock it and accept the USB debugging prompt."
+    fi
+    die "no phone found by adb. Check the cable and that USB debugging is on (adb devices)."
+fi
+if [ "$n_dev" -gt 1 ] && [ -z "${ANDROID_SERIAL:-}" ]; then
+    die "more than one device in adb; pick one with: ANDROID_SERIAL=<serial> phone-bridge (see adb devices)"
+fi
+adb shell pm path "$PKG" >/dev/null 2>&1 \
+    || die "app not installed. Build and install it: ./build.sh && adb install -r usb-audio-bridge.apk"
 for p in $SPK_PORT $MIC_PORT; do
-    ss -tln 2>/dev/null | grep -q "127.0.0.1:$p" \
-        || die "PipeWire nao esta escutando em 127.0.0.1:$p (confira ~/.config/pipewire/pipewire.conf.d/21 e 22)."
+    listening "$p" \
+        || die "PipeWire isn't listening on 127.0.0.1:$p. Install the configs: pc/install.sh"
 done
 
+# camera receiver: available if there's a v4l2loopback device and ffmpeg
+CAM_OK=false; CAM_WHY=""
+if ! command -v ffmpeg >/dev/null; then CAM_WHY="ffmpeg not installed"
+elif ! command -v python3 >/dev/null; then CAM_WHY="python3 not installed"
+elif ! ls /sys/devices/virtual/video4linux/video* >/dev/null 2>&1; then
+    CAM_WHY="v4l2loopback not loaded: sudo modprobe v4l2loopback exclusive_caps=1 card_label=\"Phone Camera\""
+else CAM_OK=true; fi
+if [ -n "$CAM" ] && [ "$CAM_OK" != true ]; then die "camera unavailable: $CAM_WHY"; fi
+
+echo $$ > "$PIDFILE"
+
+# ---------------------------------------------------------------- routing helpers
 sink_idx() { pactl list short sinks | awk -v n="$1" '$2==n {print $1}'; }
-move_inputs() {   # move_inputs <de_sink> <para_sink>: so o que esta no sink de origem
+move_inputs() {   # move_inputs <from_sink> <to_sink>: only what's on the source sink
     local from to; from=$(sink_idx "$1"); to="$2"
     [ -n "$from" ] || return 0
     pactl list short sink-inputs | awk -v f="$from" '$2==f {print $1}' | while read -r id; do
@@ -88,57 +147,95 @@ move_inputs() {   # move_inputs <de_sink> <para_sink>: so o que esta no sink de 
     done
 }
 
+# remember where the audio was, to put it back on exit
+PREV_SINK=$(pactl get-default-sink 2>/dev/null || true)
+PREV_SOURCE=$(pactl get-default-source 2>/dev/null || true)
+[ "$PREV_SINK" = phone_speaker ] && PREV_SINK=""
+[ "$PREV_SOURCE" = phone_mic ] && PREV_SOURCE=""
+CAM_PID=""
+
 restore() {
+    set +e   # best effort: one failing step must not skip the rest of the cleanup
     echo
-    echo "devolvendo audio pro HDMI e fechando o app..."
-    pactl set-default-sink "$HDMI" 2>/dev/null || true
-    move_inputs phone_speaker "$HDMI"
+    echo "putting the audio back${PREV_SINK:+ on $PREV_SINK} and closing the app..."
+    [ -n "$CAM_PID" ] && kill "$CAM_PID" 2>/dev/null || true
+    if [ -n "$PREV_SINK" ]; then
+        pactl set-default-sink "$PREV_SINK" 2>/dev/null || true
+        move_inputs phone_speaker "$PREV_SINK"
+    fi
+    [ -n "$PREV_SOURCE" ] && pactl set-default-source "$PREV_SOURCE" 2>/dev/null || true
     adb shell am force-stop "$PKG" 2>/dev/null || true
-    adb reverse --remove "tcp:$SPK_PORT" 2>/dev/null || true
-    adb reverse --remove "tcp:$MIC_PORT" 2>/dev/null || true
+    for p in $SPK_PORT $MIC_PORT $CAM_PORT; do adb reverse --remove "tcp:$p" 2>/dev/null || true; done
 }
 trap 'rm -f "$PIDFILE"; restore' EXIT
-trap 'exit 0' INT TERM      # sem isso o TERM restaurava e o script seguia vivo
+trap 'exit 0' INT TERM      # without this, TERM would restore and the script would keep going
 
-# o app antigo tambem conectaria na 12345 e dobraria o stream
+# ---------------------------------------------------------------- start
+# the old player app would also connect to 12345 and double the stream
 adb shell am force-stop com.kaytat.simpleprotocolplayer 2>/dev/null || true
 adb shell am force-stop "$PKG" 2>/dev/null || true
 
+if [ "$CAM_OK" = true ]; then
+    "$HERE/phone-cam" --port "$CAM_PORT" &
+    CAM_PID=$!
+fi
+
 adb reverse "tcp:$SPK_PORT" "tcp:$SPK_PORT" >/dev/null
 adb reverse "tcp:$MIC_PORT" "tcp:$MIC_PORT" >/dev/null
-adb shell pm grant "$PKG" android.permission.RECORD_AUDIO 2>/dev/null || true
-adb shell pm grant "$PKG" android.permission.POST_NOTIFICATIONS 2>/dev/null || true
+[ "$CAM_OK" = true ] && adb reverse "tcp:$CAM_PORT" "tcp:$CAM_PORT" >/dev/null
+for perm in RECORD_AUDIO CAMERA POST_NOTIFICATIONS; do
+    adb shell pm grant "$PKG" "android.permission.$perm" 2>/dev/null || true
+done
 adb shell input keyevent KEYCODE_WAKEUP 2>/dev/null || true
 
-extras=(--ez autostart true --ez spk true --ez mic true --ei spkport "$SPK_PORT" --ei micport "$MIC_PORT")
+extras=(--ez autostart true --ez spk "$SPK" --ez mic "$MIC"
+        --ei spkport "$SPK_PORT" --ei micport "$MIC_PORT" --ei camport "$CAM_PORT")
 [ -n "$BUF" ] && extras+=(--ei buf "$BUF")
 [ -n "$SRC" ] && extras+=(--ei src "$SRC")
-adb shell am start -n "$PKG/.MainActivity" "${extras[@]}" >/dev/null
+if [ -n "$CAM" ]; then
+    extras+=(--ez cam true --ez camfront "$([ "$CAM" = front ] && echo true || echo false)")
+fi
+adb shell am start -n "$PKG/.Autostart" "${extras[@]}" >/dev/null
 
-echo "esperando o app conectar nas duas portas..."
+conns() { ss -Htn state established "( sport = :$1 )" 2>/dev/null | wc -l; }
+echo "waiting for the app to connect..."
 spk=0; mic=0
 for _ in $(seq 1 30); do
-    [ "$(ss -Htn state established "( sport = :$SPK_PORT )" 2>/dev/null | wc -l)" -gt 0 ] && spk=1 || spk=0
-    [ "$(ss -Htn state established "( sport = :$MIC_PORT )" 2>/dev/null | wc -l)" -gt 0 ] && mic=1 || mic=0
-    [ "$spk" = 1 ] && [ "$mic" = 1 ] && break
+    spk=$(conns "$SPK_PORT"); mic=$(conns "$MIC_PORT")
+    { [ "$SPK" = false ] || [ "$spk" -gt 0 ]; } && { [ "$MIC" = false ] || [ "$mic" -gt 0 ]; } && break
     sleep 0.5
 done
-[ "$spk" = 1 ] && echo "  saida: CONECTADA" || echo "  saida: nao conectou (celular desbloqueado?)"
-[ "$mic" = 1 ] && echo "  mic:   CONECTADO" || echo "  mic:   nao conectou (permissao de microfone?)"
+if [ "$SPK" = true ]; then
+    [ "$spk" -gt 0 ] && echo "  output: CONNECTED" || echo "  output: not connected (is the phone unlocked?)"
+fi
+if [ "$MIC" = true ]; then
+    [ "$mic" -gt 0 ] && echo "  mic:    CONNECTED" || echo "  mic:    not connected (mic permission?)"
+fi
+if [ "$CAM_OK" = true ]; then
+    echo "  camera: receiver ready (turn the camera on in the app${CAM:+; starting the $CAM camera})"
+else
+    echo "  camera: unavailable ($CAM_WHY)"
+fi
 
-pactl set-default-sink phone_speaker
-pactl set-default-source phone_mic
-move_inputs "$HDMI" phone_speaker
+if [ "$SPK" = true ]; then
+    pactl set-default-sink phone_speaker
+    [ -n "$PREV_SINK" ] && move_inputs "$PREV_SINK" phone_speaker
+fi
+[ "$MIC" = true ] && pactl set-default-source phone_mic
 
 echo
-echo "audio do PC -> celular, mic do celular -> PC   (buffer/fonte: ${BUF:-do app}/${SRC:-do app})"
-echo "entrada nos apps/jogos: 'Celular (mic via USB)'. Ctrl-C para encerrar."
+echo "PC audio -> phone, phone mic -> PC   (buffer: ${BUF:-from the app}, mic mode: ${SRC:-from the app})"
+echo "in apps/games pick the input 'Phone mic (USB)'$([ "$CAM_OK" = true ] && echo " and the camera on $(ls /sys/devices/virtual/video4linux | head -1 | sed 's|^|/dev/|')"). Ctrl-C to stop."
 
-# acompanha: avisa quando cair ou voltar
+# keep watching: report when something drops or comes back
 last=""
 while sleep 2; do
-    s=$(ss -Htn state established "( sport = :$SPK_PORT )" 2>/dev/null | wc -l)
-    m=$(ss -Htn state established "( sport = :$MIC_PORT )" 2>/dev/null | wc -l)
-    now="saida=$([ "$s" -gt 0 ] && echo on || echo OFF) mic=$([ "$m" -gt 0 ] && echo on || echo OFF)"
+    now="output=$([ "$(conns "$SPK_PORT")" -gt 0 ] && echo on || echo OFF)"
+    now+=" mic=$([ "$(conns "$MIC_PORT")" -gt 0 ] && echo on || echo OFF)"
+    [ "$CAM_OK" = true ] && now+=" camera=$([ "$(conns "$CAM_PORT")" -gt 0 ] && echo on || echo off)"
+    if [ -n "$CAM_PID" ] && ! kill -0 "$CAM_PID" 2>/dev/null; then
+        echo "[$(date +%H:%M:%S)] the camera receiver stopped"; CAM_PID=""
+    fi
+    if ! adb get-state >/dev/null 2>&1; then now="phone disconnected (cable?)"; fi
     [ "$now" != "$last" ] && { echo "[$(date +%H:%M:%S)] $now"; last="$now"; }
 done

@@ -1,0 +1,143 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">USB Audio Bridge</string>
+    <string name="tagline">PC audio, mic and camera over the USB cable</string>
+
+    <!-- main status -->
+    <string name="start">Start</string>
+    <string name="stop">Stop</string>
+    <string name="hero_stopped">Stopped</string>
+    <string name="hero_stopped_hint">Plug in the USB cable and run <b>phone-bridge</b> on the PC, or tap Start.</string>
+    <string name="hero_waiting">Waiting for the PC…</string>
+    <string name="hero_waiting_hint">Is <b>phone-bridge</b> running on the PC? It sets up the USB tunnel (adb reverse).</string>
+    <string name="hero_partial">Partially connected</string>
+    <string name="hero_partial_hint">Some streams are still waiting for the PC. See below.</string>
+    <string name="hero_connected">Connected to the PC</string>
+    <string name="hero_connected_hint">Everything is flowing. You can turn the screen off.</string>
+    <string name="hero_nothing">Nothing enabled</string>
+    <string name="hero_nothing_hint">Turn on at least one of output, mic or camera below.</string>
+
+    <!-- per-stream status -->
+    <string name="st_off">Off</string>
+    <string name="st_not_running">Not running</string>
+    <string name="st_waiting">Waiting for the PC…</string>
+    <string name="st_spk_on">Playing · %1$d ms delay</string>
+    <string name="st_spk_muted">Muted · %1$d ms delay</string>
+    <string name="st_spk_detail">queue %1$d ms · %2$d KB/s · %3$d underruns · %4$d ms skipped</string>
+    <string name="st_mic_on">Sending to the PC</string>
+    <string name="st_mic_muted">Muted (the PC gets silence)</string>
+    <string name="st_mic_detail">%1$d KB/s</string>
+    <string name="st_cam_back">Streaming the back camera</string>
+    <string name="st_cam_front">Streaming the front camera</string>
+    <string name="st_cam_detail">%1$s · %2$.0f fps now · %3$d KB/s</string>
+
+    <!-- output -->
+    <string name="out_title">PC audio → phone</string>
+    <string name="mute">Mute</string>
+    <string name="unmute">Unmute</string>
+    <string name="percent">%1$d%%</string>
+    <string name="play_on">Play on</string>
+    <string name="bt_tip">Bluetooth adds about 150–250 ms on its own. Wired headphones give the lowest delay.</string>
+
+    <!-- mic -->
+    <string name="mic_title">Phone mic → PC</string>
+    <string name="record_from">Record from</string>
+    <string name="mic_mode">Mic mode</string>
+    <string name="src_mic">Standard</string>
+    <string name="src_voice">Voice call (echo + noise cancelling)</string>
+    <string name="src_raw">Raw (no processing)</string>
+    <string name="src_recognition">Voice recognition</string>
+    <string name="src_camcorder">Camcorder</string>
+
+    <!-- camera -->
+    <string name="cam_title">Phone camera → PC</string>
+    <string name="cam_back">Back</string>
+    <string name="cam_front">Front</string>
+    <string name="cam_preview_hint">Preview shows up while streaming</string>
+    <string name="cam_resolution">Resolution</string>
+    <string name="cam_fps">Frame rate</string>
+    <string name="fps_n">%1$d fps</string>
+    <string name="cam_quality">Quality</string>
+    <string name="quality_low">Low (less bandwidth)</string>
+    <string name="quality_medium">Medium</string>
+    <string name="quality_high">High</string>
+    <string name="cam_rotation">Rotation</string>
+    <string name="rot_auto">Auto (follows the phone)</string>
+    <string name="rot_n">%1$d°</string>
+    <string name="cam_mirror">Mirror image</string>
+    <string name="cam_hint">On the PC it shows up as a webcam (\"Phone Camera\"). Switching cameras is live.</string>
+
+    <!-- latency -->
+    <string name="latency_title">Latency</string>
+    <string name="preset_lowest">Lowest</string>
+    <string name="preset_balanced">Balanced</string>
+    <string name="preset_stable">Stable</string>
+    <string name="preset_lowest_desc">15 ms output / 10 ms mic. Best with wired headphones; may crackle on a busy phone.</string>
+    <string name="preset_balanced_desc">30 ms output / 20 ms mic. A good default.</string>
+    <string name="preset_stable_desc">80 ms output / 40 ms mic. Pick this if you hear dropouts.</string>
+    <string name="preset_custom_desc">Custom: %1$d ms output / %2$d ms mic.</string>
+    <string name="fine_tune">Fine-tune</string>
+    <string name="out_buffer">Output buffer</string>
+    <string name="out_buffer_ms">Output buffer: %1$d ms (smaller = less delay)</string>
+    <string name="mic_buffer">Mic buffer</string>
+    <string name="mic_buffer_ms">Mic buffer: %1$d ms</string>
+
+    <!-- advanced -->
+    <string name="advanced">Advanced</string>
+    <string name="keep_awake">Keep the screen on while the app is open</string>
+    <string name="ports">Ports (the PC must use the same ones)</string>
+    <string name="port_out">Output</string>
+    <string name="port_mic">Mic</string>
+    <string name="port_cam">Camera</string>
+    <string name="ports_hint">Change them only if they are taken. On the PC: phone-bridge ports &lt;out&gt; &lt;mic&gt; &lt;cam&gt;.</string>
+    <string name="apply_ports">Save ports</string>
+    <string name="ports_invalid">Ports must be 1024–65535 and all different</string>
+    <string name="ports_saved">Ports saved</string>
+    <string name="reset_defaults">Reset to defaults</string>
+    <string name="defaults_restored">Defaults restored</string>
+    <string name="footer">v%1$s · PC side: run pc/install.sh once, then phone-bridge</string>
+
+    <!-- phone audio devices -->
+    <string name="dev_auto">Automatic (Android default)</string>
+    <string name="dev_speaker">Phone speaker</string>
+    <string name="dev_earpiece">Earpiece</string>
+    <string name="dev_builtin_mic">Phone mic</string>
+    <string name="dev_bt">Bluetooth: %1$s</string>
+    <string name="dev_bt_call">Bluetooth (call mode): %1$s</string>
+    <string name="dev_bt_call_in">Bluetooth headset mic: %1$s (lower quality)</string>
+    <string name="dev_wired">Wired headphones</string>
+    <string name="dev_wired_mic">Wired headset mic</string>
+    <string name="dev_usb">USB: %1$s</string>
+    <string name="dev_ble">Bluetooth LE: %1$s</string>
+
+    <!-- notification -->
+    <string name="notif_channel">Audio bridge</string>
+    <string name="notif_title">USB Audio Bridge is running</string>
+    <string name="notif_audio">PC audio</string>
+    <string name="notif_mic">Mic</string>
+    <string name="notif_mic_muted">Mic muted</string>
+    <string name="notif_camera">Camera</string>
+    <string name="notif_idle">Nothing enabled</string>
+    <string name="mute_mic">Mute mic</string>
+    <string name="unmute_mic">Unmute mic</string>
+
+    <!-- errors -->
+    <string name="err_no_tunnel">No USB tunnel on port %1$d. Run phone-bridge on the PC.</string>
+    <string name="err_pc_closed">The PC closed the connection (is phone-bridge running?)</string>
+    <string name="err_pc_not_listening">Nothing is listening on PC port %1$d (PipeWire config installed?)</string>
+    <string name="err_cam_pc">The PC camera receiver isn\'t running on port %1$d (needs v4l2loopback, see phone-bridge)</string>
+    <string name="err_audio_track">Audio output error %1$d</string>
+    <string name="err_audio_record">Mic read error %1$d</string>
+    <string name="err_mic_open">Can\'t open the mic: %1$s</string>
+    <string name="err_mic_init">The mic didn\'t start (in use by another app?)</string>
+    <string name="err_mic_permission">Microphone permission denied. Allow it in the app settings.</string>
+    <string name="err_cam_permission">Camera permission denied. Allow it in the app settings.</string>
+    <string name="err_no_front_cam">This phone has no front camera</string>
+    <string name="err_no_back_cam">This phone has no back camera</string>
+    <string name="err_cam_open">Can\'t open the camera: %1$s</string>
+    <string name="err_cam_taken">Another app took the camera</string>
+    <string name="err_cam_error">Camera error %1$d</string>
+    <string name="err_cam_timeout">The camera didn\'t open in time</string>
+    <string name="err_cam_session">The camera rejected this resolution; try another one</string>
+    <string name="err_encoder">The video encoder doesn\'t support %1$s; pick a lower resolution</string>
+</resources>

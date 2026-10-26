@@ -8,12 +8,12 @@ import android.graphics.Paint;
 import android.graphics.Rect;
 import android.view.View;
 
-/** Spectrograma rolando: tempo para a direita, frequencia (log, 50 Hz..24 kHz) para cima. */
+/** Scrolling spectrogram: time to the right, frequency (log, 50 Hz..24 kHz) up. */
 final class SpectrogramView extends View {
     private static final int COLS = 320;
     private static final int ROWS = 128;
     private static final int WIN = 1024;
-    private static final int HOP = 768;          // ~16 ms por coluna -> ~5 s na tela
+    private static final int HOP = 768;          // ~16 ms per column -> ~5 s on screen
     private static final double F_MIN = 50.0, F_MAX = 24000.0;
     private static final double DB_FLOOR = -90.0, DB_RANGE = 70.0;
 
@@ -51,7 +51,7 @@ final class SpectrogramView extends View {
             int b0 = clampBin((int) Math.round(f0 / binHz));
             int b1 = clampBin((int) Math.round(f1 / binHz));
             lo[r] = b0;
-            hi[r] = Math.max(b0 + 1, b1);        // exclusivo
+            hi[r] = Math.max(b0 + 1, b1);        // exclusive
         }
         float d = c.getResources().getDisplayMetrics().density;
         textPaint.setColor(0xCCFFFFFF);
@@ -67,10 +67,10 @@ final class SpectrogramView extends View {
         return Math.max(1, Math.min(WIN / 2 - 1, b));
     }
 
-    /** Consome as amostras novas e desenha as colunas correspondentes. */
+    /** Consumes the new samples and draws the matching columns. */
     void update() {
         long w = tap.writePos();
-        if (w - readPos > SpectrumTap.SIZE - 2 * WIN) readPos = w - 2 * WIN;   // ficou pra tras
+        if (w - readPos > SpectrumTap.SIZE - 2 * WIN) readPos = w - 2 * WIN;   // fell behind
         boolean changed = false;
         while (w - readPos >= WIN) {
             tap.copy(readPos, tmp, WIN);
@@ -93,7 +93,7 @@ final class SpectrogramView extends View {
             im[i] = 0f;
         }
         fft();
-        final float norm = 4f / WIN;             // pico de senoide cheia com Hann = N/4
+        final float norm = 4f / WIN;             // full-scale sine peak with Hann = N/4
         for (int r = 0; r < ROWS; r++) {
             float m = 0f;
             for (int k = lo[r]; k < hi[r]; k++) {
@@ -137,7 +137,7 @@ final class SpectrogramView extends View {
         return v < 0f ? 0f : (v > 1f ? 1f : v);
     }
 
-    /** Preto -> roxo -> laranja -> amarelo. */
+    /** Black -> purple -> orange -> yellow. */
     private static int color(float t) {
         float r = clamp01(1.6f * t);
         float g = clamp01(2.4f * (t - 0.4f));
@@ -150,7 +150,7 @@ final class SpectrogramView extends View {
         dst.set(0, 0, getWidth(), getHeight());
         canvas.drawBitmap(bmp, src, dst, bmpPaint);
 
-        // marcas de frequencia
+        // frequency marks
         int[] marks = {100, 1000, 10000};
         String[] names = {"100 Hz", "1 kHz", "10 kHz"};
         for (int i = 0; i < marks.length; i++) {

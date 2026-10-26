@@ -3,11 +3,13 @@ package dev.gabriwar.usbaudio;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.Socket;
+import java.net.SocketTimeoutException;
 
 final class Io {
     private Io() {}
 
-    /** Ganho em PCM S16LE, com saturacao (sem estourar pra ruido). */
+    /** Gain on PCM S16LE, saturating (clips instead of wrapping around into noise). */
     static void gain(byte[] b, int len, float g) {
         if (g == 1f) return;
         for (int i = 0; i + 1 < len; i += 2) {
@@ -22,22 +24,22 @@ final class Io {
         int off = 0;
         while (off < len) {
             int n = in.read(b, off, len - off);
-            if (n < 0) throw new EOFException("conexao fechada pelo PC");
+            if (n < 0) throw new EOFException("connection closed by the PC");
             off += n;
         }
     }
 
-    /** Descarta exatamente len bytes (ou lanca EOF). Retorna len. */
-    static long skipFully(InputStream in, long len) throws IOException {
-        long left = len;
-        while (left > 0) {
-            long n = in.skip(left);
-            if (n <= 0) {
-                if (in.read() < 0) throw new EOFException("conexao fechada pelo PC");
-                n = 1;
-            }
-            left -= n;
+    /**
+     * The adb tunnel accepts the connection even with nothing listening on the PC, and closes it
+     * right after. Peek for a moment so we don't open the mic/camera for nothing.
+     */
+    static void probe(Socket s) throws IOException {
+        s.setSoTimeout(150);
+        try {
+            if (s.getInputStream().read() < 0) throw new EOFException("nothing listening on the PC");
+        } catch (SocketTimeoutException alive) {
+            // timeout = live connection, that's what we want
         }
-        return len;
+        s.setSoTimeout(0);
     }
 }

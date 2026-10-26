@@ -1,26 +1,27 @@
 package dev.gabriwar.usbaudio;
 
 import android.media.AudioDeviceInfo;
+import android.view.Surface;
 
-/** Estado compartilhado entre servico e tela (mesmo processo). */
+/** State shared between the service and the screen (same process). */
 final class Stats {
     private Stats() {}
 
     static volatile boolean running;
 
-    // amostras pro espectrograma (ja depois do mute: mostra o que realmente sai/entra)
+    // samples for the spectrograms (after mute/gain: shows what really goes out / comes in)
     static final SpectrumTap spkTap = new SpectrumTap();
     static final SpectrumTap micTap = new SpectrumTap();
 
-    // mute: a conexao continua de pe, so vai silencio
+    // mute: the connection stays up, only silence is sent
     static volatile boolean muteSpk;
     static volatile boolean muteMic;
 
-    // ganho por software, 1.0 = 100%
+    // software gain, 1.0 = 100%
     static volatile float spkGain = 1f;
     static volatile float micGain = 1f;
 
-    // dispositivo escolhido no celular (null = automatico); os pipes trocam ao vivo
+    // device chosen on the phone (null = automatic); the pipes switch live
     static volatile AudioDeviceInfo outDevice;
     static volatile AudioDeviceInfo inDevice;
 
@@ -28,11 +29,21 @@ final class Stats {
     static volatile long spkBytes;
     static volatile int spkUnderruns;
     static volatile long spkDroppedMs;
-    static volatile int spkQueuedMs;      // atraso na fila do AudioTrack
+    static volatile int spkQueuedMs;      // delay sitting in our AudioTrack queue
+    static volatile int spkLatencyMs;     // queue + what the Android audio stack reports (-1 = unknown)
     static volatile String spkError = "";
 
     static volatile boolean micConnected;
     static volatile long micBytes;
-    static volatile int micPeak;          // 0..32767, com decaimento
+    static volatile int micPeak;          // 0..32767, decaying
     static volatile String micError = "";
+
+    // camera: the facing is switched live by the pipe; the preview surface comes from the screen
+    static volatile boolean camFront;
+    static volatile Surface camPreview;
+    static volatile boolean camConnected;
+    static volatile long camBytes;
+    static volatile long camFrames;
+    static volatile String camInfo = "";  // "1280x720 30 fps" of the running stream
+    static volatile String camError = "";
 }

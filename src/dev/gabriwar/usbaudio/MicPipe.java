@@ -1,34 +1,38 @@
 package dev.gabriwar.usbaudio;
 
+import android.content.Context;
 import android.media.AudioDeviceInfo;
 import android.media.AudioFormat;
 import android.media.AudioRecord;
 import android.media.MediaRecorder;
 import android.os.Process;
 
+import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.io.OutputStream;
+import java.net.ConnectException;
 import java.net.InetSocketAddress;
 import java.net.Socket;
-import java.net.SocketTimeoutException;
+import java.net.SocketException;
 import java.util.Arrays;
 
 /**
- * Celular -> PC. Captura o microfone (mono S16LE 48 kHz) e manda pra porta do PipeWire.
- * So grava enquanto ha PC do outro lado, pra nao deixar o indicador de mic aceso a toa.
+ * Phone -> PC. Captures the mic (mono S16LE 48 kHz) and sends it to the PipeWire port.
+ * Only records while there is a PC on the other end, so the mic indicator isn't lit for nothing.
  */
 final class MicPipe extends Thread {
     private static final int CHUNK = 2 * 240;        // mono, 5 ms
 
+    private final Context ctx;
     private volatile boolean run = true;
     private volatile Socket sock;
     private final int source;
     private final int bufferMs;
     private final int port;
 
-    MicPipe(int source, int bufferMs, int port) {
+    MicPipe(Context ctx, int source, int bufferMs, int port) {
         super("mic-pipe");
+        this.ctx = ctx;
         this.port = port;
         this.source = source;
         this.bufferMs = bufferMs;
@@ -60,12 +64,12 @@ final class MicPipe extends Thread {
                     .build();
         } catch (RuntimeException e) {
             if (src != MediaRecorder.AudioSource.MIC) return open(MediaRecorder.AudioSource.MIC);
-            throw new IOException("sem acesso ao microfone: " + e.getMessage());
+            throw new IOException(ctx.getString(R.string.err_mic_open, e.getMessage()));
         }
         if (r.getState() != AudioRecord.STATE_INITIALIZED) {
             r.release();
             if (src != MediaRecorder.AudioSource.MIC) return open(MediaRecorder.AudioSource.MIC);
-            throw new IOException("AudioRecord nao inicializou");
+            throw new IOException(ctx.getString(R.string.err_mic_init));
         }
         return r;
     }
@@ -80,20 +84,10 @@ final class MicPipe extends Thread {
             sock = s;
             AudioRecord rec = null;
             try {
-                s.setSendBufferSize(8 * 1024);           // antes do connect
+                s.setSendBufferSize(8 * 1024);           // before connect
                 s.connect(new InetSocketAddress("127.0.0.1", port), 1000);
                 s.setTcpNoDelay(true);
-
-                // O tunel do adb aceita a conexao mesmo sem servidor no PC e fecha logo em
-                // seguida. Espia um instante pra nao ligar o microfone a toa.
-                s.setSoTimeout(150);
-                InputStream in = s.getInputStream();
-                try {
-                    if (in.read() < 0) throw new IOException("PC nao esta ouvindo a porta " + port);
-                } catch (SocketTimeoutException alive) {
-                    // timeout = conexao viva, e o que queremos
-                }
-                s.setSoTimeout(0);
+                Io.probe(s);
 
                 OutputStream out = s.getOutputStream();
                 rec = open(source);
@@ -112,7 +106,7 @@ final class MicPipe extends Thread {
                     int off = 0;
                     while (off < CHUNK) {
                         int n = rec.read(buf, off, CHUNK - off);
-                        if (n < 0) throw new IOException("AudioRecord erro " + n);
+                        if (n < 0) throw new IOException(ctx.getString(R.string.err_audio_record, n));
                         off += n;
                     }
                     if (Stats.muteMic) Arrays.fill(buf, 0, CHUNK, (byte) 0);
@@ -128,7 +122,11 @@ final class MicPipe extends Thread {
                     out.write(buf, 0, CHUNK);
                     Stats.micBytes += CHUNK;
                 }
-            } catch (IOException e) {
+            } catch (ConnectException e) {
+                if (run) Stats.micError = ctx.getString(R.string.err_no_tunnel, port);
+            } catch (EOFException | SocketException e) {   // closed / reset by the PC
+                if (run) Stats.micError = ctx.getString(R.string.err_pc_not_listening, port);
+            } catch (IOException | RuntimeException e) {   // AudioRecord throws unchecked too
                 if (run) Stats.micError = String.valueOf(e.getMessage());
             } finally {
                 Stats.micConnected = false;

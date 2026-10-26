@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Usa o microfone do celular como mic do PC, via USB (adb).
-# O audio cai no no virtual "phone_mic" -> selecione "Celular (mic via USB)"
-# como entrada no app que for usar.
+# LEGACY alternative (no app needed): uses the phone mic as a PC mic via scrcpy.
+# The audio lands on the virtual node "phone_mic" -> pick "Phone mic (USB)"
+# as the input in the app you're using. Prefer phone-bridge.
 #
-# Uso:  phone-mic [buffer_ms] [fonte]
-#   buffer_ms  default 40. Menor = menos delay, mais risco de picotar.
-#   fonte      default "mic" (verificada: mean -31/-27 dB, max -10/-9 dB).
-#              Alternativas: mic-voice-communication (cancelamento de eco/AGC),
+# Usage:  phone-mic [buffer_ms] [source]
+#   buffer_ms  default 40. Smaller = less delay, more risk of crackling.
+#   source     default "mic" (measured: mean -31/-27 dB, max -10/-9 dB).
+#              Alternatives: mic-voice-communication (echo cancelling/AGC),
 #              mic-unprocessed, mic-camcorder, mic-voice-recognition
 set -euo pipefail
 
@@ -14,13 +14,13 @@ BUF="${1:-40}"
 SRC="${2:-mic}"
 
 if ! adb get-state >/dev/null 2>&1; then
-    echo "erro: nenhum celular em modo device no adb. Confira o cabo e a" >&2
-    echo "       autorizacao de depuracao USB (adb devices)." >&2
+    echo "error: no phone in device mode in adb. Check the cable and the" >&2
+    echo "       USB debugging authorization (adb devices)." >&2
     exit 1
 fi
 
-echo "mic do celular -> phone_mic  (buffer ${BUF}ms, fonte ${SRC})"
-echo "selecione 'Celular (mic via USB)' como entrada. Ctrl-C para parar."
+echo "phone mic -> phone_mic  (buffer ${BUF}ms, source ${SRC})"
+echo "pick 'Phone mic (USB)' as the input. Ctrl-C to stop."
 
 exec env PIPEWIRE_PROPS="{ target.object = phone_mic_in, node.name = phone-mic-bridge }" \
     scrcpy \

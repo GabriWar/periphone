@@ -3,7 +3,7 @@ package dev.gabriwar.usbaudio;
 import android.media.AudioDeviceCallback;
 import android.media.AudioDeviceInfo;
 
-/** Avisa quando entra/sai dispositivo de audio (fone BT conectou, cabo saiu...). */
+/** Fires when an audio device comes or goes (BT headset connected, cable unplugged...). */
 final class DeviceWatcher extends AudioDeviceCallback {
     private final Runnable onChange;
 
