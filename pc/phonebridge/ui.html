@@ -154,7 +154,8 @@ function toast(t) { const e = $("#toast"); e.textContent = t; e.classList.add("s
 
 async function post(path, body) {
   busyUntil = Date.now() + 1500;
-  const r = await fetch("api/" + path, { method: "POST", body: body ? JSON.stringify(body) : null });
+  const r = await fetch("api/" + path, { method: "POST", body: body ? JSON.stringify(body) : null,
+    headers: { "Content-Type": "application/json", "X-Phonebridge": "1" } });
   if (!r.ok) toast(await r.text());
 }
 

@@ -5,19 +5,26 @@ package main
 //
 // Access: the browser is launched with a one-time link (/open/<nonce>, single use, 60 s) that sets
 // an HttpOnly SameSite=Strict cookie holding the session token; the page and the API need that
-// cookie. So the token never appears on a command line (/proc is readable by other local users)
-// or in the log, web pages you visit can't drive it (no CSRF), and other host names are refused
-// (no DNS rebinding).
+// cookie. On top of that:
+//   - every connection must belong to this Linux user (socket owner, from /proc/net/tcp), so other
+//     accounts on the PC can't use it even if they grab the one-time link from a command line;
+//   - actions (POST) must come from this exact origin with a custom header, which a page from
+//     another port of 127.0.0.1 (same "site" for cookies) can't send without a CORS preflight;
+//   - other host names are refused (DNS rebinding).
 
 import (
+	"bufio"
 	"crypto/rand"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -104,6 +111,10 @@ func serveWeb(c *controller, quit func()) (open func(), err error) {
 				http.Error(rw, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
+			if r.Header.Get("Origin") != "http://"+w.host || r.Header.Get("X-Phonebridge") != "1" {
+				http.Error(rw, "not allowed", http.StatusForbidden)
+				return
+			}
 			if err := f(r); err != nil {
 				http.Error(rw, err.Error(), http.StatusBadRequest)
 				return
@@ -137,7 +148,7 @@ func serveWeb(c *controller, quit func()) (open func(), err error) {
 	post("quit", func(*http.Request) error { go quit(); return nil })
 
 	srv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
-		if r.Host != w.host { // other sites / DNS rebinding
+		if r.Host != w.host || !sameUser(r.RemoteAddr, w.host) { // DNS rebinding / other accounts
 			http.NotFound(rw, r)
 			return
 		}
@@ -146,6 +157,31 @@ func serveWeb(c *controller, quit func()) (open func(), err error) {
 	go srv.Serve(l)
 	logf("window: http://%s/", w.host)
 	return w.open, nil
+}
+
+// sameUser: the client socket (127.0.0.1:port -> us) belongs to this Linux user.
+func sameUser(remote, local string) bool {
+	_, cport, err1 := net.SplitHostPort(remote)
+	_, lport, err2 := net.SplitHostPort(local)
+	cp, err3 := strconv.Atoi(cport)
+	lp, err4 := strconv.Atoi(lport)
+	if err1 != nil || err2 != nil || err3 != nil || err4 != nil {
+		return false
+	}
+	f, err := os.Open("/proc/net/tcp")
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	want := fmt.Sprintf("0100007F:%04X 0100007F:%04X", cp, lp) // client socket: local=client, remote=us
+	sc := bufio.NewScanner(f)
+	for sc.Scan() {
+		fl := strings.Fields(sc.Text())
+		if len(fl) > 7 && fl[1]+" "+fl[2] == want {
+			return fl[7] == strconv.Itoa(os.Getuid())
+		}
+	}
+	return false
 }
 
 // open launches a window with a fresh one-time link.
