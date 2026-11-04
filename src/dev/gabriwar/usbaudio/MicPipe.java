@@ -9,15 +9,13 @@ import android.os.Process;
 
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.OutputStream;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.SocketException;
 import java.util.Arrays;
 
 /**
- * Phone -> PC. Captures the mic (mono S16LE 48 kHz) and sends it to the PipeWire port.
+ * Phone -> PC. Captures the mic (mono S16LE 48 kHz) and sends it to the PipeWire port (USB tunnel)
+ * or to phone-relay (Wi-Fi / Bluetooth, see AudioLink).
  * Only records while there is a PC on the other end, so the mic indicator isn't lit for nothing.
  */
 final class MicPipe extends Thread {
@@ -25,25 +23,25 @@ final class MicPipe extends Thread {
 
     private final Context ctx;
     private volatile boolean run = true;
-    private volatile Socket sock;
+    private volatile AudioLink conn;
     private final int source;
     private final int bufferMs;
     private final int port;
+    private final Cfg.Link link;
 
-    MicPipe(Context ctx, int source, int bufferMs, int port) {
+    MicPipe(Context ctx, int source, int bufferMs, int port, Cfg.Link link) {
         super("mic-pipe");
         this.ctx = ctx;
         this.port = port;
         this.source = source;
         this.bufferMs = bufferMs;
+        this.link = link;
     }
 
     void shutdown() {
         run = false;
-        Socket s = sock;
-        if (s != null) {
-            try { s.close(); } catch (IOException ignored) {}
-        }
+        AudioLink c = conn;
+        if (c != null) c.abort();
         interrupt();
     }
 
@@ -80,16 +78,11 @@ final class MicPipe extends Thread {
         byte[] buf = new byte[CHUNK];
 
         while (run) {
-            Socket s = new Socket();
-            sock = s;
+            AudioLink c = new AudioLink(ctx, link, Proto.ROLE_MIC, port, 1);
+            conn = c;
             AudioRecord rec = null;
             try {
-                s.setSendBufferSize(8 * 1024);           // before connect
-                s.connect(new InetSocketAddress("127.0.0.1", port), 1000);
-                s.setTcpNoDelay(true);
-                Io.probe(s);
-
-                OutputStream out = s.getOutputStream();
+                c.open();
                 rec = open(source);
                 AudioDeviceInfo appliedDev = Stats.inDevice;
                 rec.setPreferredDevice(appliedDev);
@@ -119,7 +112,7 @@ final class MicPipe extends Thread {
                         if (v > peak) peak = v;
                     }
                     Stats.micPeak = Math.max(peak, Stats.micPeak - 400);
-                    out.write(buf, 0, CHUNK);
+                    c.write(buf);
                     Stats.micBytes += CHUNK;
                 }
             } catch (ConnectException e) {
@@ -131,16 +124,16 @@ final class MicPipe extends Thread {
             } finally {
                 Stats.micConnected = false;
                 Stats.micPeak = 0;
-                sock = null;
+                conn = null;
                 if (rec != null) {
                     try { rec.stop(); } catch (IllegalStateException ignored) {}
                     rec.release();
                 }
-                try { s.close(); } catch (IOException ignored) {}
+                c.close();
             }
 
             if (run) {
-                try { Thread.sleep(400); } catch (InterruptedException e) { break; }
+                try { Thread.sleep(link.usb() ? 400 : 1500); } catch (InterruptedException e) { break; }
             }
         }
         Stats.micConnected = false;

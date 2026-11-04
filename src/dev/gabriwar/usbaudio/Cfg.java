@@ -12,6 +12,11 @@ final class Cfg {
     static final int DEFAULT_SPK_PORT = 12345;   // PC -> phone, S16LE stereo
     static final int DEFAULT_MIC_PORT = 12346;   // phone -> PC, S16LE mono
     static final int DEFAULT_CAM_PORT = 12347;   // phone -> PC, framed H.264 (see CameraPipe)
+    static final int AUDIO_PORT = 12348;         // phone -> PC, S16LE stereo: the phone's own sound
+    static final int NET_PORT = 12350;           // phone-relay on the PC (Wi-Fi / Bluetooth), UDP + TCP
+
+    static final int LINK_USB = 0, LINK_WIFI = 1, LINK_PAN = 2, LINK_BT = 3;
+    static final int CODEC_AUTO = 0, CODEC_PCM = 1, CODEC_OPUS = 2;
 
     static final String K_SPK = "spk";
     static final String K_MIC = "mic";
@@ -35,6 +40,13 @@ final class Cfg {
     static final String K_CAM_MIRROR = "camMirror";
     static final String K_CAM_PREVIEW = "camPreview";
     static final String K_ADVANCED = "advanced";      // advanced section expanded
+    static final String K_CAP = "cap";                // phone audio -> PC
+    static final String K_LINK = "link";              // LINK_*
+    static final String K_HOST = "host";              // PC address for Wi-Fi / tethering, empty = find it
+    static final String K_PIN = "pin";                // shown by phone-bridge on the PC
+    static final String K_ENCRYPT = "encrypt";
+    static final String K_CODEC = "codec";            // CODEC_*
+    static final String K_BT_ADDR = "btAddr";         // paired PC for Bluetooth direct
 
     static final int MIN_BUF_MS = 10, MAX_BUF_MS = 200;
     static final int DEFAULT_BUF_MS = 30;
@@ -57,5 +69,35 @@ final class Cfg {
 
     static boolean validPort(int p) {
         return p >= 1024 && p <= 65535;
+    }
+
+    /** How the pipes reach the PC: a snapshot of the prefs, so a change restarts them. */
+    static final class Link {
+        final int mode;
+        final String host, pin, btAddr;
+        final boolean encrypt, opus;
+
+        Link(SharedPreferences p) {
+            mode = Math.max(LINK_USB, Math.min(LINK_BT, p.getInt(K_LINK, LINK_USB)));
+            host = p.getString(K_HOST, "").trim();
+            pin = p.getString(K_PIN, "").trim();
+            btAddr = p.getString(K_BT_ADDR, "");
+            encrypt = p.getBoolean(K_ENCRYPT, true);
+            int codec = p.getInt(K_CODEC, CODEC_AUTO);
+            // Bluetooth can't carry raw PCM reliably (~2.3 Mbit/s for both ways); Wi-Fi can
+            opus = codec == CODEC_OPUS || (codec == CODEC_AUTO && (mode == LINK_PAN || mode == LINK_BT));
+        }
+
+        boolean usb() {
+            return mode == LINK_USB;
+        }
+
+        int flags() {
+            return (encrypt ? Proto.F_ENCRYPT : 0) | (opus ? Proto.F_OPUS : 0);
+        }
+
+        String sig() {
+            return usb() ? "usb" : mode + "/" + host + "/" + pin + "/" + btAddr + "/" + encrypt + "/" + opus;
+        }
     }
 }

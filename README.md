@@ -1,8 +1,9 @@
 # USB Audio Bridge
 
-Use an Android phone as the PC's sound card **and webcam over the USB cable**: the PC's audio
-plays on the phone (and from there on Bluetooth or wired headphones), the phone mic becomes a
-microphone on the PC, and the phone camera (front or back) becomes a webcam.
+Use an Android phone as the PC's sound card **and webcam over the USB cable, Wi-Fi or Bluetooth**:
+the PC's audio plays on the phone (and from there on Bluetooth or wired headphones), the phone mic
+becomes a microphone on the PC, the phone camera (front or back) becomes a webcam, and the phone's
+own sound can play on the PC speakers.
 Made for a machine with no Bluetooth and no analog output.
 
 ```
@@ -14,6 +15,50 @@ phone_mic     ◀─ TCP 127.0.0.1:12346 ◀────────────
 
 Audio format is fixed: PCM S16LE 48 kHz (stereo out, mono mic). Fixed on purpose: a player at
 the wrong rate pitches the audio down (48k played at 44.1k).
+
+Wi-Fi and Bluetooth go through `phone-relay` on the PC; the PipeWire ports stay loopback-only:
+
+```
+phone ══ UDP :12350 (audio, 5 ms packets) ═══╗
+      ══ TCP :12350 (camera) ════════════════╬══ phone-relay ── 127.0.0.1:12345..12348
+      ══ RFCOMM (Bluetooth direct, audio) ═══╝
+```
+
+## Links
+
+| Link | PC | Audio | Camera | Extra delay vs USB (estimate, not measured) |
+|------|----|-------|--------|--------------------|
+| USB cable (default) | `phone-bridge` | raw PCM | yes | — |
+| Wi-Fi | `phone-bridge --wifi` | raw PCM over UDP | yes | ~2–10 ms (more if the network is busy) |
+| Bluetooth tethering | `phone-bridge --pan [phone MAC]` | Opus 5 ms | low quality only | ~20–40 ms |
+| Bluetooth direct | `phone-bridge --bt` | Opus 5 ms | no | ~20–40 ms |
+
+Pick the same link in the app (Connection card). With wireless debugging (`adb pair` / `adb connect`)
+`phone-bridge` sets up the app itself; without adb, open the app, pick the link, type the PIN and
+tap Start.
+
+- **PIN**: `phone-bridge pin` shows it (`phone-bridge pin new` changes it). The check is SPAKE2,
+  so someone recording the traffic can't brute-force the PIN offline; wrong guesses are limited
+  to one per second.
+- **Encryption** (on by default, `--no-encrypt` / app switch to turn it off): AES-128-GCM per
+  packet, a fresh key per stream from the PIN handshake. Hardware AES on both sides: a few µs
+  per packet.
+- **Firewall**: the phone must reach UDP and TCP port 12350 on the PC (`sudo ufw allow 12350`).
+  Discovery (empty "PC address" in the app) uses a UDP broadcast.
+- **Bluetooth**: pair the phone with the PC first. Direct mode needs `python-dbus` and
+  `python-gobject`; tethering needs NetworkManager (`nmcli`) to join the phone's network.
+- **Codec**: Automatic = raw PCM on Wi-Fi (no codec delay), Opus on Bluetooth (raw stereo + mic is
+  ~2.3 Mbit/s, more than Bluetooth carries reliably). Opus runs in restricted low-delay mode with
+  5 ms frames, so it adds ~5 ms; lost packets are concealed instead of clicking.
+
+### Making Wi-Fi faster
+
+1. Turn off power saving on the PC's Wi-Fi: `sudo iw dev wlan0 set power_save off` (it parks the
+   radio between beacons: tens of ms of jitter). The app already holds a low-latency Wi-Fi lock
+   on the phone (fully effective while the screen is on).
+2. Use 5 GHz, close to the router. Packets are marked DSCP EF (voice queue on WMM routers).
+3. Wired Ethernet on the PC, phone on Wi-Fi, is better than both on Wi-Fi.
+4. If it crackles, raise the output buffer (Latency card); Wi-Fi jitter is the limit, not the code.
 
 ## Quick start
 
@@ -32,6 +77,10 @@ All text lives in `res/values/strings.xml`; add `res/values-xx/strings.xml` for 
   delay, spectrogram. Warns when Bluetooth is the output (it alone adds ~150–250 ms).
 - **Phone mic → PC**: level meter, mute (also from the notification), volume, input device,
   mic mode (standard / voice call with echo cancelling / raw / ...), spectrogram.
+- **Phone audio → PC**: the phone's own sound (music, videos, games) on the PC speakers
+  (Android 10+). Android asks for the screen-capture permission each session; apps that block
+  capture (calls, some DRM video) stay silent. The PC's audio playing on the phone is excluded,
+  so nothing loops.
 - **Phone camera → PC**: front/back switch (live, no reconnect), preview, resolution, frame
   rate, quality, rotation (auto follows how the phone is held) and mirror.
 - **Latency presets** (Lowest / Balanced / Stable) with fine-tune sliders.
@@ -39,7 +88,8 @@ All text lives in `res/values/strings.xml`; add `res/values-xx/strings.xml` for 
 - Runs as a foreground service: the screen can turn off.
 
 Builds without Gradle (Android SDK with any recent `platforms;android-NN` + `build-tools`,
-JDK 17+). `build.sh` picks the newest installed ones.
+the NDK, cmake, JDK 17+). `build.sh` picks the newest installed ones and, the first time,
+downloads libopus (checksum-pinned) into `.cache/` and builds it for arm64 and armv7.
 
 ### Latency and quality
 
@@ -60,7 +110,11 @@ JDK 17+). `build.sh` picks the newest installed ones.
 - `pipewire/20-phone-mic.conf` — virtual microphone **"Phone mic (USB)"**.
 - `pipewire/21-phone-speaker.conf` — sink **"Phone speaker (USB)"** served on `127.0.0.1:12345`.
 - `pipewire/22-phone-mic-server.conf` — receives the phone mic on `127.0.0.1:12346`.
-- `bin/phone-bridge`, `bin/phone-cam` (and the legacy `phone-mic` / `phone-speaker`) to `~/.local/bin`.
+- `bin/phone-bridge`, `bin/phone-cam`, `bin/phone-relay` (and the legacy `phone-mic` /
+  `phone-speaker`) to `~/.local/bin`.
+
+The phone-audio receiver (port 12348) isn't a config file: `phone-bridge` loads it while running,
+pointed at the speakers you had before, so the phone's sound never goes back to the phone.
 
 > The PipeWire config parser **does not accept non-ASCII characters, not even in comments**.
 
@@ -78,6 +132,9 @@ phone-bridge                  # output + mic (+ camera receiver if v4l2loopback 
 phone-bridge --cam front      # also start the front camera (or: --cam back)
 phone-bridge -b 40 -m 7       # 40 ms buffer, mic in voice-call mode (echo cancelling)
 phone-bridge --no-mic         # only PC audio -> phone
+phone-bridge --wifi -a        # over Wi-Fi, plus the phone's sound on the PC speakers
+phone-bridge --bt             # Bluetooth direct
+phone-bridge pin              # the PIN to type in the app
 phone-bridge stop             # stop and put the audio back where it was
 phone-bridge ports 23456 23457 23458   # if 12345/12346/12347 are taken
 ```

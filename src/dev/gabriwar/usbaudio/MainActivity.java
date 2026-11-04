@@ -2,6 +2,10 @@ package dev.gabriwar.usbaudio;
 
 import android.Manifest;
 import android.app.Activity;
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothManager;
+import android.content.ActivityNotFoundException;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageInfo;
@@ -17,6 +21,8 @@ import android.graphics.drawable.RippleDrawable;
 import android.hardware.display.DisplayManager;
 import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
+import android.media.projection.MediaProjectionConfig;
+import android.media.projection.MediaProjectionManager;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -63,7 +69,11 @@ public class MainActivity extends Activity {
     private static final int[] PRESET_NAMES = {R.string.preset_lowest, R.string.preset_balanced, R.string.preset_stable};
     private static final int[] PRESET_DESC = {R.string.preset_lowest_desc, R.string.preset_balanced_desc,
             R.string.preset_stable_desc};
-    private static final int REQ_MIC = 1, REQ_NOTIF = 2, REQ_CAM = 3;
+    private static final int REQ_MIC = 1, REQ_NOTIF = 2, REQ_CAM = 3, REQ_BT = 4, REQ_PROJ = 5;
+    private static final int[] LINK_NAMES = {R.string.link_usb, R.string.link_wifi, R.string.link_pan, R.string.link_bt};
+    private static final int[] LINK_DESC = {R.string.link_usb_desc, R.string.link_wifi_desc, R.string.link_pan_desc,
+            R.string.link_bt_desc};
+    private static final int[] CODEC_NAMES = {R.string.codec_auto, R.string.codec_pcm, R.string.codec_opus};
 
     private SharedPreferences prefs;
     private AudioManager am;
@@ -74,7 +84,7 @@ public class MainActivity extends Activity {
     private final List<String> outNames = new ArrayList<>(), inNames = new ArrayList<>();
 
     private final Handler ui = new Handler(Looper.getMainLooper());
-    private long lastSpkBytes, lastMicBytes, lastCamBytes, lastCamFrames, lastT;
+    private long lastSpkBytes, lastMicBytes, lastCamBytes, lastCamFrames, lastCapBytes, lastT;
     private boolean resumed, reflecting;
 
     // hero
@@ -110,6 +120,18 @@ public class MainActivity extends Activity {
     private SurfaceTexture previewTexture;
     private int previewW = 640, previewH = 360;
     private Spinner spCamSize, spCamFps, spCamQuality, spCamRot;
+    // connection
+    private TextView[] linkSeg;
+    private TextView linkDesc, linkWhere;
+    private LinearLayout netBody, hostBox, btBox;
+    private EditText etHost, etPin;
+    private Switch swEncrypt;
+    private Spinner spBt, spCodec;
+    private final List<String> btAddrs = new ArrayList<>(), btNames = new ArrayList<>();
+    // phone sound -> PC
+    private Switch swCap;
+    private View capDot;
+    private TextView capStatus, capDetail;
     // latency
     private TextView[] presetSeg;
     private TextView presetDesc, tvBuf, tvMicBuf;
@@ -342,9 +364,11 @@ public class MainActivity extends Activity {
 
         buildHeader(root);
         buildHero(root);
+        buildConnection(root);
         buildOutput(root);
         buildMic(root);
         applyVolumes(false);
+        buildCapture(root);
         buildCamera(root);
         buildLatency(root);
         buildAdvanced(root);
@@ -374,9 +398,13 @@ public class MainActivity extends Activity {
     /** One request for everything the enabled streams need (overlapping requests get dropped). */
     private void requestMissingPermissions() {
         List<String> perms = new ArrayList<>();
-        if (prefs.getBoolean(Cfg.K_MIC, true)
+        if ((prefs.getBoolean(Cfg.K_MIC, true) || prefs.getBoolean(Cfg.K_CAP, false))
                 && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
             perms.add(Manifest.permission.RECORD_AUDIO);
+        }
+        if (Build.VERSION.SDK_INT >= 31 && prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB) == Cfg.LINK_BT
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            perms.add(Manifest.permission.BLUETOOTH_CONNECT);
         }
         if (prefs.getBoolean(Cfg.K_CAM, false)
                 && checkSelfPermission(Manifest.permission.CAMERA) != PackageManager.PERMISSION_GRANTED) {
@@ -416,6 +444,113 @@ public class MainActivity extends Activity {
         btnStart.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
         btnStart.setOnClickListener(v -> onToggle());
         c.addView(btnStart, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
+    }
+
+    private void buildConnection(LinearLayout root) {
+        LinearLayout c = card(root);
+        cardHeader(c, R.drawable.ic_link, R.string.link_title, null);
+        linkSeg = segmented(c, LINK_NAMES, v -> setLink((Integer) v.getTag()));
+        linkDesc = text("", 13, TEXT2, false);
+        linkDesc.setPadding(0, dp(10), 0, 0);
+        c.addView(linkDesc);
+
+        netBody = new LinearLayout(this);
+        netBody.setOrientation(LinearLayout.VERTICAL);
+        c.addView(netBody);
+
+        hostBox = new LinearLayout(this);
+        hostBox.setOrientation(LinearLayout.VERTICAL);
+        netBody.addView(hostBox);
+        hostBox.addView(fieldLabel(R.string.pc_address));
+        etHost = textField(prefs.getString(Cfg.K_HOST, ""), R.string.pc_address_hint,
+                InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+        hostBox.addView(etHost);
+
+        btBox = new LinearLayout(this);
+        btBox.setOrientation(LinearLayout.VERTICAL);
+        netBody.addView(btBox);
+        spBt = spinner(btBox, R.string.bt_pc, btNames, 0, pos -> {
+            if (pos >= btAddrs.size()) return;
+            prefs.edit().putString(Cfg.K_BT_ADDR, btAddrs.get(pos)).apply();
+            applyIfRunning();
+        });
+
+        netBody.addView(fieldLabel(R.string.pin));
+        etPin = textField(prefs.getString(Cfg.K_PIN, ""), R.string.pin_hint, InputType.TYPE_CLASS_NUMBER);
+        netBody.addView(etPin);
+
+        swEncrypt = new Switch(this);
+        swEncrypt.setText(R.string.encrypt);
+        swEncrypt.setTextColor(TEXT);
+        swEncrypt.setTextSize(15);
+        swEncrypt.setChecked(prefs.getBoolean(Cfg.K_ENCRYPT, true));
+        swEncrypt.setOnCheckedChangeListener((v, on) -> {
+            prefs.edit().putBoolean(Cfg.K_ENCRYPT, on).apply();
+            applyIfRunning();
+        });
+        LinearLayout.LayoutParams ep = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
+        ep.topMargin = dp(6);
+        netBody.addView(swEncrypt, ep);
+
+        spCodec = spinner(netBody, R.string.codec, strings(CODEC_NAMES),
+                prefs.getInt(Cfg.K_CODEC, Cfg.CODEC_AUTO), pos -> {
+                    if (prefs.getInt(Cfg.K_CODEC, Cfg.CODEC_AUTO) == pos) return;
+                    prefs.edit().putInt(Cfg.K_CODEC, pos).apply();
+                    applyIfRunning();
+                });
+
+        Button save = pillButton();
+        save.setText(R.string.save_link);
+        stylePill(save, CARD_HI);
+        save.setOnClickListener(v -> saveNet());
+        LinearLayout.LayoutParams sp = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
+        sp.topMargin = dp(12);
+        netBody.addView(save, sp);
+
+        linkWhere = text("", 12, GREEN, false);
+        linkWhere.setPadding(0, dp(8), 0, 0);
+        c.addView(linkWhere);
+        showLink();
+    }
+
+    private EditText textField(String value, int hint, int type) {
+        EditText e = new EditText(this);
+        e.setInputType(type);
+        e.setImeOptions(EditorInfo.IME_ACTION_DONE);
+        e.setHint(hint);
+        e.setText(value);
+        e.setTextColor(TEXT);
+        e.setHintTextColor(GRAY);
+        e.setSingleLine(true);
+        e.setOnEditorActionListener((v, action, ev) -> {
+            saveNet();
+            return false;
+        });
+        return e;
+    }
+
+    private void buildCapture(LinearLayout root) {
+        LinearLayout c = card(root);
+        swCap = new Switch(this);
+        swCap.setChecked(prefs.getBoolean(Cfg.K_CAP, false));
+        swCap.setOnCheckedChangeListener((v, on) -> {
+            prefs.edit().putBoolean(Cfg.K_CAP, on).apply();
+            if (on && !reflecting) {
+                if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                    requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
+                }
+                if (Stats.running) requestProjection();
+            }
+            applyIfRunning();
+        });
+        cardHeader(c, R.drawable.ic_phone_audio, R.string.cap_title, swCap);
+        capDot = new View(this);
+        capStatus = text("", 15, TEXT, true);
+        capDetail = text("", 12, TEXT2, false);
+        statusLines(c, capDot, capStatus, capDetail);
+        TextView hint = text(getString(R.string.cap_hint), 12, TEXT2, false);
+        hint.setPadding(0, dp(8), 0, 0);
+        c.addView(hint);
     }
 
     private void buildOutput(LinearLayout root) {
@@ -762,6 +897,96 @@ public class MainActivity extends Activity {
 
     // ------------------------------------------------------------------ actions
 
+    private void setLink(int mode) {
+        prefs.edit().putInt(Cfg.K_LINK, mode).apply();
+        showLink();
+        if (mode == Cfg.LINK_BT && Build.VERSION.SDK_INT >= 31
+                && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
+        }
+        applyIfRunning();
+    }
+
+    private void showLink() {
+        int mode = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB);
+        selectSeg(linkSeg, mode);
+        linkDesc.setText(LINK_DESC[mode]);
+        netBody.setVisibility(mode == Cfg.LINK_USB ? View.GONE : View.VISIBLE);
+        hostBox.setVisibility(mode == Cfg.LINK_WIFI || mode == Cfg.LINK_PAN ? View.VISIBLE : View.GONE);
+        btBox.setVisibility(mode == Cfg.LINK_BT ? View.VISIBLE : View.GONE);
+        if (mode == Cfg.LINK_BT) refreshBt();
+    }
+
+    /** Paired devices to pick the PC from (needs BLUETOOTH_CONNECT on Android 12+). */
+    @SuppressWarnings("MissingPermission")
+    private void refreshBt() {
+        btAddrs.clear();
+        List<String> names = new ArrayList<>();
+        String saved = prefs.getString(Cfg.K_BT_ADDR, "");
+        int sel = 0;
+        BluetoothManager bm = getSystemService(BluetoothManager.class);
+        BluetoothAdapter ad = bm == null ? null : bm.getAdapter();
+        boolean allowed = Build.VERSION.SDK_INT < 31
+                || checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED;
+        if (ad != null && allowed) {
+            try {
+                for (BluetoothDevice d : ad.getBondedDevices()) {
+                    btAddrs.add(d.getAddress());
+                    names.add((d.getName() == null ? "?" : d.getName()) + "  (" + d.getAddress() + ")");
+                    if (d.getAddress().equals(saved)) sel = btAddrs.size() - 1;
+                }
+            } catch (SecurityException ignored) {
+            }
+        }
+        if (btAddrs.isEmpty()) {
+            btAddrs.add("");
+            names.add(getString(ad == null ? R.string.err_bt_none : !allowed ? R.string.err_bt_permission
+                    : R.string.bt_none_paired));
+        }
+        btNames.clear();
+        btNames.addAll(names);
+        spBt.setAdapter(adapter(new ArrayList<>(btNames)));
+        select(spBt, sel);
+        if (!btAddrs.get(sel).equals(saved)) prefs.edit().putString(Cfg.K_BT_ADDR, btAddrs.get(sel)).apply();
+    }
+
+    private void saveNet() {
+        String host = etHost.getText().toString().trim(), pin = etPin.getText().toString().trim();
+        if (host.equals(prefs.getString(Cfg.K_HOST, "")) && pin.equals(prefs.getString(Cfg.K_PIN, ""))) return;
+        prefs.edit().putString(Cfg.K_HOST, host).putString(Cfg.K_PIN, pin).apply();
+        Stats.pcAddr = null;
+        Toast.makeText(this, R.string.link_saved, Toast.LENGTH_SHORT).show();
+        applyIfRunning();
+    }
+
+    /** Playback capture needs the screen-capture consent; asked for each session (Android rule). */
+    private void requestProjection() {
+        if (Build.VERSION.SDK_INT < 29 || Stats.projection != null) return;
+        MediaProjectionManager mpm = getSystemService(MediaProjectionManager.class);
+        Intent i = Build.VERSION.SDK_INT >= 34
+                ? mpm.createScreenCaptureIntent(MediaProjectionConfig.createConfigForDefaultDisplay())
+                : mpm.createScreenCaptureIntent();
+        try {
+            startActivityForResult(i, REQ_PROJ);
+        } catch (ActivityNotFoundException e) {
+            Toast.makeText(this, R.string.err_cap_android, Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    @SuppressWarnings("deprecation")   // startActivityForResult: no AndroidX here
+    protected void onActivityResult(int code, int result, Intent data) {
+        super.onActivityResult(code, result, data);
+        if (code != REQ_PROJ) return;
+        if (result == RESULT_OK && data != null) {
+            startForegroundService(new Intent(this, BridgeService.class).setAction(BridgeService.ACTION_START)
+                    .putExtra(BridgeService.EXTRA_PROJ_CODE, result)
+                    .putExtra(BridgeService.EXTRA_PROJ_DATA, data));
+        } else {
+            Toast.makeText(this, R.string.err_cap_consent, Toast.LENGTH_LONG).show();
+        }
+    }
+
     private void setAdvanced(boolean show) {
         advBody.setVisibility(show ? View.VISIBLE : View.GONE);
         advArrow.setText(show ? "▾" : "▸");
@@ -851,6 +1076,12 @@ public class MainActivity extends Activity {
         swSpk.setChecked(prefs.getBoolean(Cfg.K_SPK, true));
         swMic.setChecked(prefs.getBoolean(Cfg.K_MIC, true));
         swCam.setChecked(prefs.getBoolean(Cfg.K_CAM, false));
+        swCap.setChecked(prefs.getBoolean(Cfg.K_CAP, false));
+        swEncrypt.setChecked(prefs.getBoolean(Cfg.K_ENCRYPT, true));
+        etHost.setText(prefs.getString(Cfg.K_HOST, ""));
+        etPin.setText(prefs.getString(Cfg.K_PIN, ""));
+        select(spCodec, prefs.getInt(Cfg.K_CODEC, Cfg.CODEC_AUTO));
+        showLink();
         swAwake.setChecked(prefs.getBoolean(Cfg.K_AWAKE, true));
         swMirror.setChecked(prefs.getBoolean(Cfg.K_CAM_MIRROR, false));
         sbBuf.setProgress(prefs.getInt(Cfg.K_BUF, Cfg.DEFAULT_BUF_MS) - Cfg.MIN_BUF_MS);
@@ -880,6 +1111,7 @@ public class MainActivity extends Activity {
             startService(new Intent(this, BridgeService.class).setAction(BridgeService.ACTION_STOP));
         } else {
             startBridge();
+            if (prefs.getBoolean(Cfg.K_CAP, false)) requestProjection();
         }
     }
 
@@ -919,14 +1151,27 @@ public class MainActivity extends Activity {
         if (i.hasExtra("buf")) e.putInt(Cfg.K_BUF, Cfg.clampBuf(i.getIntExtra("buf", Cfg.DEFAULT_BUF_MS)));
         if (i.hasExtra("micbuf")) e.putInt(Cfg.K_MIC_BUF, Cfg.clampBuf(i.getIntExtra("micbuf", Cfg.DEFAULT_MIC_BUF_MS)));
         if (i.hasExtra("src")) e.putInt(Cfg.K_SRC, i.getIntExtra("src", Cfg.DEFAULT_SRC));
+        if (i.hasExtra("cap")) e.putBoolean(Cfg.K_CAP, i.getBooleanExtra("cap", false));
+        if (i.hasExtra("link")) {
+            e.putInt(Cfg.K_LINK, Math.max(Cfg.LINK_USB, Math.min(Cfg.LINK_BT, i.getIntExtra("link", Cfg.LINK_USB))));
+        }
+        if (i.hasExtra("host")) e.putString(Cfg.K_HOST, String.valueOf(i.getStringExtra("host")).trim());
+        if (i.hasExtra("pin")) e.putString(Cfg.K_PIN, String.valueOf(i.getStringExtra("pin")).trim());
+        if (i.hasExtra("encrypt")) e.putBoolean(Cfg.K_ENCRYPT, i.getBooleanExtra("encrypt", true));
+        if (i.hasExtra("codec")) {
+            e.putInt(Cfg.K_CODEC, Math.max(Cfg.CODEC_AUTO, Math.min(Cfg.CODEC_OPUS, i.getIntExtra("codec", 0))));
+        }
+        if (i.hasExtra("btaddr")) e.putString(Cfg.K_BT_ADDR, String.valueOf(i.getStringExtra("btaddr")).trim());
         int p;
         if (Cfg.validPort(p = i.getIntExtra("spkport", -1))) e.putInt(Cfg.K_SPK_PORT, p);
         if (Cfg.validPort(p = i.getIntExtra("micport", -1))) e.putInt(Cfg.K_MIC_PORT, p);
         if (Cfg.validPort(p = i.getIntExtra("camport", -1))) e.putInt(Cfg.K_CAM_PORT, p);
         e.apply();
+        Stats.pcAddr = null;
         reflectPrefs();
         camBody.setVisibility(swCam.isChecked() ? View.VISIBLE : View.GONE);
         startBridge();
+        if (prefs.getBoolean(Cfg.K_CAP, false)) requestProjection();
     }
 
     @Override
@@ -940,6 +1185,7 @@ public class MainActivity extends Activity {
                 Toast.makeText(this, R.string.err_cam_permission, Toast.LENGTH_LONG).show();
             }
         }
+        if (code == REQ_BT || prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB) == Cfg.LINK_BT) refreshBt();
         applyIfRunning();   // pick up the newly granted mic/camera
     }
 
@@ -1169,6 +1415,7 @@ public class MainActivity extends Activity {
         lastMicBytes = Stats.micBytes;
         lastCamBytes = Stats.camBytes;
         lastCamFrames = Stats.camFrames;
+        lastCapBytes = Stats.capBytes;
         ui.post(tick);
         ui.post(specTick);
         if (watcher == null) watcher = new DeviceWatcher(this::refreshDevices);
@@ -1212,6 +1459,8 @@ public class MainActivity extends Activity {
         double micRate = (Stats.micBytes - lastMicBytes) / dt / 1024.0;
         double camRate = (Stats.camBytes - lastCamBytes) / dt / 1024.0;
         double camFps = (Stats.camFrames - lastCamFrames) / dt;
+        double capRate = (Stats.capBytes - lastCapBytes) / dt / 1024.0;
+        lastCapBytes = Stats.capBytes;
         lastT = now;
         lastSpkBytes = Stats.spkBytes;
         lastMicBytes = Stats.micBytes;
@@ -1220,6 +1469,8 @@ public class MainActivity extends Activity {
 
         boolean run = Stats.running;
         boolean spkOn = swSpk.isChecked(), micOn = swMic.isChecked(), camOn = swCam.isChecked();
+        boolean capOn = swCap.isChecked();
+        boolean usb = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB) == Cfg.LINK_USB;
 
         // --- output
         if (!spkOn) {
@@ -1267,8 +1518,21 @@ public class MainActivity extends Activity {
             setStatus(camDot, camStatus, camDetail, AMBER, getString(R.string.st_waiting), Stats.camError);
         }
 
+        // --- phone sound -> PC
+        if (!capOn) {
+            setStatus(capDot, capStatus, capDetail, GRAY, getString(R.string.st_off), "");
+        } else if (!run) {
+            setStatus(capDot, capStatus, capDetail, GRAY, getString(R.string.st_not_running), Stats.capError);
+        } else if (Stats.capConnected) {
+            setStatus(capDot, capStatus, capDetail, GREEN, getString(R.string.st_cap_on),
+                    getString(R.string.st_mic_detail, Math.round(capRate)));
+        } else {
+            setStatus(capDot, capStatus, capDetail, AMBER, getString(R.string.st_waiting), Stats.capError);
+        }
+
         // --- overall
         int waiting = 0, live = 0;
+        if (capOn) { if (Stats.capConnected) live++; else waiting++; }
         if (spkOn) { if (Stats.spkConnected) live++; else waiting++; }
         if (micOn) { if (Stats.micConnected) live++; else waiting++; }
         if (camOn) { if (Stats.camConnected) live++; else waiting++; }
@@ -1291,8 +1555,10 @@ public class MainActivity extends Activity {
         } else {
             paintDot(heroDot, AMBER);
             heroTitle.setText(R.string.hero_waiting);
-            heroHint.setText(R.string.hero_waiting_hint);
+            heroHint.setText(usb ? R.string.hero_waiting_hint : R.string.hero_waiting_net_hint);
         }
+        linkWhere.setText(!usb && run && live > 0 ? getString(R.string.link_where, Stats.linkWhere) : "");
+        linkWhere.setVisibility(linkWhere.length() > 0 ? View.VISIBLE : View.GONE);
         btnStart.setText(run ? R.string.stop : R.string.start);
         stylePill(btnStart, run ? CARD_HI : ACCENT);
         btnStart.setTextColor(run ? RED : 0xFFFFFFFF);

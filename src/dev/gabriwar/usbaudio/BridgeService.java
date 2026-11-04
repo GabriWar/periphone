@@ -10,8 +10,13 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.PackageManager;
 import android.content.pm.ServiceInfo;
+import android.media.projection.MediaProjection;
+import android.media.projection.MediaProjectionManager;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.os.PowerManager;
 
 /**
@@ -23,14 +28,18 @@ public class BridgeService extends Service {
     static final String ACTION_START = "dev.gabriwar.usbaudio.START";
     static final String ACTION_STOP = "dev.gabriwar.usbaudio.STOP";
     static final String ACTION_MUTE_MIC = "dev.gabriwar.usbaudio.MUTE_MIC";
+    // screen-capture consent (resultCode + data Intent) for the phone sound -> PC stream
+    static final String EXTRA_PROJ_CODE = "projCode", EXTRA_PROJ_DATA = "projData";
     private static final String CHANNEL = "bridge";
     private static final int NOTIF_ID = 1;
 
     private SpeakerPipe spk;
     private MicPipe mic;
     private CameraPipe cam;
-    private String spkSig = "", micSig = "", camSig = "";
+    private CapturePipe cap;
+    private String spkSig = "", micSig = "", camSig = "", capSig = "";
     private PowerManager.WakeLock wl;
+    private WifiManager.WifiLock wifiLock;
 
     @Override
     public IBinder onBind(Intent intent) {
@@ -52,10 +61,46 @@ public class BridgeService extends Service {
             else stopSelf();
             return START_NOT_STICKY;
         }
+        if (intent != null && intent.hasExtra(EXTRA_PROJ_DATA)) takeProjection(intent);
         applyPrefs();
         goForeground();
         // NOT_STICKY on purpose: a restart in the background isn't allowed the mic or camera.
         return START_NOT_STICKY;
+    }
+
+    /**
+     * Android 14 wants the service in the foreground with the mediaProjection type *before*
+     * getMediaProjection, and the consent is single use: keep the projection until stopped.
+     */
+    @SuppressWarnings("deprecation")   // getParcelableExtra(String): the typed one is API 33+
+    private void takeProjection(Intent intent) {
+        Intent data = intent.getParcelableExtra(EXTRA_PROJ_DATA);
+        int code = intent.getIntExtra(EXTRA_PROJ_CODE, 0);
+        if (data == null) return;
+        stopProjection();
+        projectionPending = true;
+        goForeground();
+        projectionPending = false;
+        try {
+            MediaProjection mp = getSystemService(MediaProjectionManager.class).getMediaProjection(code, data);
+            if (mp == null) return;
+            mp.registerCallback(new MediaProjection.Callback() {
+                @Override public void onStop() {             // ended from the status bar / lock screen
+                    if (Stats.projection == mp) Stats.projection = null;
+                }
+            }, new Handler(Looper.getMainLooper()));
+            Stats.projection = mp;
+        } catch (RuntimeException e) {
+            Stats.capError = String.valueOf(e.getMessage());
+        }
+    }
+
+    private boolean projectionPending;
+
+    private static void stopProjection() {
+        MediaProjection mp = Stats.projection;
+        Stats.projection = null;
+        if (mp != null) mp.stop();
     }
 
     private boolean has(String perm) {
@@ -88,6 +133,10 @@ public class BridgeService extends Service {
             if (what.length() > 0) what.append(" · ");
             what.append(getString(R.string.notif_camera));
         }
+        if (cap != null) {
+            if (what.length() > 0) what.append(" · ");
+            what.append(getString(R.string.notif_phone_audio));
+        }
         if (what.length() == 0) what.append(getString(R.string.notif_idle));
 
         Notification.Builder nb = new Notification.Builder(this, CHANNEL)
@@ -109,6 +158,7 @@ public class BridgeService extends Service {
             int types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK;
             if (mic != null) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             if (cam != null && Build.VERSION.SDK_INT >= 30) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
+            if (Stats.projection != null || projectionPending) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
             startForeground(NOTIF_ID, n, types);
         } else {
             startForeground(NOTIF_ID, n);
@@ -126,12 +176,15 @@ public class BridgeService extends Service {
         Stats.spkGain = p.getInt(Cfg.K_SPK_VOL, 100) / 100f;
         Stats.micGain = p.getInt(Cfg.K_MIC_VOL, 100) / 100f;
         Stats.camFront = p.getBoolean(Cfg.K_CAM_FRONT, false);
+        Cfg.Link link = new Cfg.Link(p);
+        String ls = "/" + link.sig();
+        applyWifiLock(link.mode == Cfg.LINK_WIFI);
 
         // --- output
         boolean spkOn = p.getBoolean(Cfg.K_SPK, true);
         int buf = p.getInt(Cfg.K_BUF, Cfg.DEFAULT_BUF_MS);
         int spkPort = p.getInt(Cfg.K_SPK_PORT, Cfg.DEFAULT_SPK_PORT);
-        String sig = spkOn + "/" + buf + "/" + spkPort;
+        String sig = spkOn + "/" + buf + "/" + spkPort + ls;
         if (!sig.equals(spkSig) || (spkOn && spk == null)) {
             if (spk != null) { spk.shutdown(); spk = null; }
             Stats.spkBytes = 0;
@@ -139,7 +192,7 @@ public class BridgeService extends Service {
             Stats.spkUnderruns = 0;
             Stats.spkError = "";
             if (spkOn) {
-                spk = new SpeakerPipe(getApplicationContext(), buf, spkPort);
+                spk = new SpeakerPipe(getApplicationContext(), buf, spkPort, link);
                 spk.start();
             }
             spkSig = sig;
@@ -151,13 +204,13 @@ public class BridgeService extends Service {
         int src = p.getInt(Cfg.K_SRC, Cfg.DEFAULT_SRC);
         int micBuf = p.getInt(Cfg.K_MIC_BUF, Cfg.DEFAULT_MIC_BUF_MS);
         int micPort = p.getInt(Cfg.K_MIC_PORT, Cfg.DEFAULT_MIC_PORT);
-        sig = micOn + "/" + micOk + "/" + src + "/" + micBuf + "/" + micPort;
+        sig = micOn + "/" + micOk + "/" + src + "/" + micBuf + "/" + micPort + ls;
         if (!sig.equals(micSig) || (micOn && micOk && mic == null)) {
             if (mic != null) { mic.shutdown(); mic = null; }
             Stats.micBytes = 0;
             Stats.micError = "";
             if (micOn && micOk) {
-                mic = new MicPipe(getApplicationContext(), src, micBuf, micPort);
+                mic = new MicPipe(getApplicationContext(), src, micBuf, micPort, link);
                 mic.start();
             } else if (micOn) {
                 Stats.micError = getString(R.string.err_mic_permission);
@@ -174,7 +227,7 @@ public class BridgeService extends Service {
         int quality = p.getInt(Cfg.K_CAM_QUALITY, Cfg.DEFAULT_CAM_QUALITY);
         int rot = p.getInt(Cfg.K_CAM_ROT, -1);
         boolean mirror = p.getBoolean(Cfg.K_CAM_MIRROR, false);
-        sig = camOn + "/" + camOk + "/" + camPort + "/" + size + "/" + fps + "/" + quality + "/" + rot + "/" + mirror;
+        sig = camOn + "/" + camOk + "/" + camPort + "/" + size + "/" + fps + "/" + quality + "/" + rot + "/" + mirror + ls;
         if (!sig.equals(camSig) || (camOn && camOk && cam == null)) {
             if (cam != null) { cam.shutdown(); cam = null; }
             Stats.camBytes = 0;
@@ -182,21 +235,55 @@ public class BridgeService extends Service {
             Stats.camError = "";
             Stats.camInfo = "";
             if (camOn && camOk) {
-                cam = new CameraPipe(getApplicationContext(), camPort, size, fps, quality, rot, mirror);
+                cam = new CameraPipe(getApplicationContext(), camPort, size, fps, quality, rot, mirror, link);
                 cam.start();
             } else if (camOn) {
                 Stats.camError = getString(R.string.err_cam_permission);
             }
             camSig = sig;
         }
+
+        // --- phone sound -> PC
+        boolean capOn = p.getBoolean(Cfg.K_CAP, false);
+        boolean capOk = has(Manifest.permission.RECORD_AUDIO);
+        sig = capOn + "/" + capOk + ls;
+        if (!sig.equals(capSig) || (capOn && capOk && cap == null)) {
+            if (cap != null) { cap.shutdown(); cap = null; }
+            Stats.capBytes = 0;
+            Stats.capError = "";
+            if (capOn && capOk) {
+                cap = new CapturePipe(getApplicationContext(), Cfg.AUDIO_PORT, link);
+                cap.start();
+            } else if (capOn) {
+                Stats.capError = getString(R.string.err_mic_permission);
+            }
+            capSig = sig;
+        }
+        if (!capOn) stopProjection();   // don't keep the "casting" indicator on for nothing
         Stats.running = true;
+    }
+
+    /** Wi-Fi power saving parks the radio between beacons: 100+ ms of jitter. Off while streaming. */
+    @SuppressWarnings("deprecation")   // HIGH_PERF: what's left below Android 10
+    private void applyWifiLock(boolean want) {
+        if (want && wifiLock == null) {
+            WifiManager wm = getApplicationContext().getSystemService(WifiManager.class);
+            if (wm == null) return;
+            wifiLock = wm.createWifiLock(Build.VERSION.SDK_INT >= 29
+                    ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY : WifiManager.WIFI_MODE_FULL_HIGH_PERF, "usbaudio:wifi");
+            wifiLock.acquire();
+        } else if (!want && wifiLock != null) {
+            if (wifiLock.isHeld()) wifiLock.release();
+            wifiLock = null;
+        }
     }
 
     private void stopPipes() {
         if (spk != null) { spk.shutdown(); spk = null; }
         if (mic != null) { mic.shutdown(); mic = null; }
         if (cam != null) { cam.shutdown(); cam = null; }
-        spkSig = micSig = camSig = "";
+        if (cap != null) { cap.shutdown(); cap = null; }
+        spkSig = micSig = camSig = capSig = "";
     }
 
     private void stopAll() {
@@ -205,6 +292,9 @@ public class BridgeService extends Service {
         Stats.spkConnected = false;
         Stats.micConnected = false;
         Stats.camConnected = false;
+        Stats.capConnected = false;
+        stopProjection();
+        applyWifiLock(false);
         if (wl != null && wl.isHeld()) wl.release();
         wl = null;
     }

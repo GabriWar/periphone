@@ -12,16 +12,13 @@ import android.util.Log;
 
 import java.io.EOFException;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.ConnectException;
-import java.net.InetSocketAddress;
-import java.net.Socket;
 import java.net.SocketException;
 import java.util.Arrays;
 
 /**
- * PC -> phone. Reads PCM S16LE stereo 48 kHz from the port (via adb reverse) and plays it on an
- * AudioTrack.
+ * PC -> phone. Reads PCM S16LE stereo 48 kHz (over the USB tunnel, or from phone-relay over
+ * Wi-Fi / Bluetooth, see AudioLink) and plays it on an AudioTrack.
  *
  * The delay that matters is what sits in the AudioTrack queue (written - played), so that is what
  * we control, around the "cushion" (the buffer setting):
@@ -40,23 +37,23 @@ final class SpeakerPipe extends Thread {
 
     private final Context ctx;
     private volatile boolean run = true;
-    private volatile Socket sock;
+    private volatile AudioLink conn;
     private final int cushionFrames;
     private final int port;
+    private final Cfg.Link link;
 
-    SpeakerPipe(Context ctx, int bufferMs, int port) {
+    SpeakerPipe(Context ctx, int bufferMs, int port, Cfg.Link link) {
         super("spk-pipe");
         this.ctx = ctx;
         this.port = port;
+        this.link = link;
         this.cushionFrames = Cfg.RATE * bufferMs / 1000;
     }
 
     void shutdown() {
         run = false;
-        Socket s = sock;
-        if (s != null) {
-            try { s.close(); } catch (IOException ignored) {}
-        }
+        AudioLink c = conn;
+        if (c != null) c.abort();
         interrupt();
     }
 
@@ -97,14 +94,11 @@ final class SpeakerPipe extends Thread {
         long lastLog = 0, lastLatency = 0;
 
         while (run) {
-            Socket s = new Socket();
-            sock = s;
+            AudioLink c = new AudioLink(ctx, link, Proto.ROLE_SPK, port, 2);
+            conn = c;
             AudioTrack track = null;
             try {
-                s.setReceiveBufferSize(16 * 1024);   // before connect: keeps the kernel queue short
-                s.connect(new InetSocketAddress("127.0.0.1", port), 1000);
-                s.setTcpNoDelay(true);
-                InputStream in = s.getInputStream();
+                c.open();
 
                 long written = 0;                    // frames written to this track
                 float smooth = cushionFrames;        // smoothed queue, in frames
@@ -112,7 +106,7 @@ final class SpeakerPipe extends Thread {
                 boolean first = true;
 
                 while (run) {
-                    Io.readFully(in, buf, CHUNK);
+                    c.read(buf);
                     // every chunk: a pipe being replaced may still clear the flag on its way out
                     Stats.spkConnected = true;
                     if (first) {
@@ -191,7 +185,7 @@ final class SpeakerPipe extends Thread {
                                 + " droppedMs=" + Stats.spkDroppedMs);
                     }
                 }
-            } catch (ConnectException e) {
+            } catch (ConnectException e) {   // only the USB tunnel throws this one
                 if (run) Stats.spkError = ctx.getString(R.string.err_no_tunnel, port);
             } catch (EOFException | SocketException e) {   // closed / reset by the PC
                 if (run) Stats.spkError = ctx.getString(R.string.err_pc_closed);
@@ -201,13 +195,13 @@ final class SpeakerPipe extends Thread {
                 Stats.spkConnected = false;
                 Stats.spkQueuedMs = 0;
                 Stats.spkLatencyMs = -1;
-                sock = null;
-                try { s.close(); } catch (IOException ignored) {}
+                conn = null;
+                c.close();
                 release(track);   // don't keep the output (and the BT headset) busy while idle
             }
 
-            if (run) {
-                try { Thread.sleep(400); } catch (InterruptedException e) { break; }
+            if (run) {   // a handshake costs the PC some CPU: don't hammer it over the network
+                try { Thread.sleep(link.usb() ? 400 : 1500); } catch (InterruptedException e) { break; }
             }
         }
     }

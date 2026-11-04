@@ -1,7 +1,10 @@
 package dev.gabriwar.usbaudio;
 
 import android.media.AudioDeviceInfo;
+import android.media.projection.MediaProjection;
 import android.view.Surface;
+
+import java.net.InetAddress;
 
 /** State shared between the service and the screen (same process). */
 final class Stats {
@@ -46,4 +49,14 @@ final class Stats {
     static volatile long camFrames;
     static volatile String camInfo = "";  // "1280x720 30 fps" of the running stream
     static volatile String camError = "";
+
+    // phone sound -> PC: needs the screen-capture consent (the service holds the projection)
+    static volatile MediaProjection projection;
+    static volatile boolean capConnected;
+    static volatile long capBytes;
+    static volatile String capError = "";
+
+    // Wi-Fi / Bluetooth: where the PC was found, and how the last stream got there
+    static volatile InetAddress pcAddr;
+    static volatile String linkWhere = "";
 }

@@ -1,15 +1,16 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">USB Audio Bridge</string>
-    <string name="tagline">PC audio, mic and camera over the USB cable</string>
+    <string name="tagline">PC audio, mic and camera over USB, Wi-Fi or Bluetooth</string>
 
     <!-- main status -->
     <string name="start">Start</string>
     <string name="stop">Stop</string>
     <string name="hero_stopped">Stopped</string>
-    <string name="hero_stopped_hint">Plug in the USB cable and run <b>phone-bridge</b> on the PC, or tap Start.</string>
+    <string name="hero_stopped_hint">Run <b>phone-bridge</b> on the PC (add --wifi, --pan or --bt for wireless), or tap Start.</string>
     <string name="hero_waiting">Waiting for the PC…</string>
     <string name="hero_waiting_hint">Is <b>phone-bridge</b> running on the PC? It sets up the USB tunnel (adb reverse).</string>
+    <string name="hero_waiting_net_hint">Is <b>phone-bridge --wifi</b> (or --pan / --bt) running on the PC, and is the PIN the one it shows?</string>
     <string name="hero_partial">Partially connected</string>
     <string name="hero_partial_hint">Some streams are still waiting for the PC. See below.</string>
     <string name="hero_connected">Connected to the PC</string>
@@ -30,6 +31,35 @@
     <string name="st_cam_back">Streaming the back camera</string>
     <string name="st_cam_front">Streaming the front camera</string>
     <string name="st_cam_detail">%1$s · %2$.0f fps now · %3$d KB/s</string>
+    <string name="st_cap_on">Sending the phone\'s sound to the PC</string>
+
+    <!-- connection -->
+    <string name="link_title">Connection</string>
+    <string name="link_usb">USB</string>
+    <string name="link_wifi">Wi-Fi</string>
+    <string name="link_pan">BT net</string>
+    <string name="link_bt">BT direct</string>
+    <string name="link_usb_desc">Through the cable (adb). Lowest delay, nothing to set up here. On the PC: phone-bridge</string>
+    <string name="link_wifi_desc">Same Wi-Fi as the PC, raw audio over UDP (a few ms more than USB). On the PC: phone-bridge --wifi</string>
+    <string name="link_pan_desc">Bluetooth tethering: turn it on in Settings › Network › Hotspot &amp; tethering. Audio is compressed (Opus). On the PC: phone-bridge --pan</string>
+    <string name="link_bt_desc">Straight to the paired PC over Bluetooth, no tethering. Audio is compressed (Opus); no camera (too little bandwidth). On the PC: phone-bridge --bt</string>
+    <string name="pc_address">PC address</string>
+    <string name="pc_address_hint">Empty = find it automatically</string>
+    <string name="bt_pc">PC (paired device)</string>
+    <string name="bt_none_paired">Nothing paired: pair the PC in the Bluetooth settings</string>
+    <string name="pin">PIN (phone-bridge shows it on the PC)</string>
+    <string name="pin_hint">6 digits</string>
+    <string name="encrypt">Encrypt (AES-128-GCM)</string>
+    <string name="codec">Audio codec</string>
+    <string name="codec_auto">Automatic (raw on Wi-Fi, Opus on Bluetooth)</string>
+    <string name="codec_pcm">Raw PCM (best quality, ~1.5 Mbit/s)</string>
+    <string name="codec_opus">Opus 5 ms (light, ~160 kbit/s)</string>
+    <string name="save_link">Save address and PIN</string>
+    <string name="link_saved">Saved</string>
+    <string name="link_where">Connected %1$s</string>
+    <string name="via_wifi">over Wi-Fi to %1$s</string>
+    <string name="via_pan">over Bluetooth tethering to %1$s</string>
+    <string name="via_bt">over Bluetooth</string>
 
     <!-- output -->
     <string name="out_title">PC audio → phone</string>
@@ -48,6 +78,10 @@
     <string name="src_raw">Raw (no processing)</string>
     <string name="src_recognition">Voice recognition</string>
     <string name="src_camcorder">Camcorder</string>
+
+    <!-- phone sound -> PC -->
+    <string name="cap_title">Phone audio → PC</string>
+    <string name="cap_hint">Plays the phone\'s sound (music, videos, games) on the PC speakers. Android asks for screen-capture permission each session. Apps that block capture (calls, some DRM video) stay silent.</string>
 
     <!-- camera -->
     <string name="cam_title">Phone camera → PC</string>
@@ -117,6 +151,7 @@
     <string name="notif_mic">Mic</string>
     <string name="notif_mic_muted">Mic muted</string>
     <string name="notif_camera">Camera</string>
+    <string name="notif_phone_audio">Phone audio</string>
     <string name="notif_idle">Nothing enabled</string>
     <string name="mute_mic">Mute mic</string>
     <string name="unmute_mic">Unmute mic</string>
@@ -139,5 +174,26 @@
     <string name="err_cam_error">Camera error %1$d</string>
     <string name="err_cam_timeout">The camera didn\'t open in time</string>
     <string name="err_cam_session">The camera rejected this resolution; try another one</string>
+    <string name="err_no_pin">Enter the PIN that phone-bridge shows on the PC</string>
+    <string name="err_bad_host">Can\'t find the PC address \"%1$s\"</string>
+    <string name="err_no_pc_found">No PC found on the network. Is phone-bridge --wifi running? A firewall on the PC must allow port 12350 (UDP and TCP).</string>
+    <string name="err_pc_no_answer">The PC at %1$s doesn\'t answer (phone-bridge --wifi running? firewall allows port 12350?)</string>
+    <string name="err_relay_down">Nothing is listening on %1$s:12350. Run phone-bridge --wifi on the PC.</string>
+    <string name="err_wrong_pin">Wrong PIN: use the one phone-bridge shows on the PC</string>
+    <string name="err_pc_side_down">The PC side of this stream isn\'t running (PipeWire configs / camera receiver?)</string>
+    <string name="err_pc_busy">The PC is slowing down attempts after a wrong PIN; retrying…</string>
+    <string name="err_pc_restarted">The PC side restarted; reconnecting…</string>
+    <string name="err_pc_unsupported">The PC side doesn\'t understand this app version: update pc/ (pc/install.sh)</string>
+    <string name="err_pc_gone">The PC stopped answering</string>
+    <string name="err_bt_pick_pc">Pick the PC (paired Bluetooth device) above</string>
+    <string name="err_bt_none">This phone has no Bluetooth</string>
+    <string name="err_bt_off">Bluetooth is off</string>
+    <string name="err_bt_connect">Can\'t reach the PC over Bluetooth. Is phone-bridge --bt running and the PC paired?</string>
+    <string name="err_bt_permission">Allow \"Nearby devices\" for the app to use Bluetooth</string>
+    <string name="err_cam_bt">The camera needs USB or Wi-Fi (Bluetooth is too slow for video)</string>
+    <string name="err_cap_open">Can\'t capture the phone\'s sound: %1$s</string>
+    <string name="err_cap_android">Capturing the phone\'s sound needs Android 10 or newer</string>
+    <string name="err_cap_consent">Needs the screen-capture permission: turn Phone audio off and on to be asked again</string>
+    <string name="err_opus">Opus isn\'t available on this phone: set Audio codec to Raw PCM</string>
     <string name="err_encoder">The video encoder doesn\'t support %1$s; pick a lower resolution</string>
 </resources>

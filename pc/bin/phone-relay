@@ -1,0 +1,677 @@
+#!/usr/bin/env python3
+"""phone-relay: connects the USB Audio Bridge app to this PC over Wi-Fi or Bluetooth.
+
+    phone ==(UDP / TCP / RFCOMM, PIN-checked, AES-GCM)==> phone-relay ==> 127.0.0.1 PipeWire ports
+
+The PipeWire ports (and phone-cam) stay loopback-only; this is the one piece listening on the
+network, and it only talks to a phone that proved it knows the PIN. Normally started by
+phone-bridge (--wifi / --pan / --bt).
+
+Links:
+  Wi-Fi and Bluetooth tethering (PAN)   UDP <port> for audio, TCP <port> for the camera
+  Bluetooth direct (RFCOMM)             one BlueZ profile per audio stream (needs python-dbus,
+                                        python-gobject); no camera, not enough bandwidth
+
+The protocol is documented in src/dev/gabriwar/usbaudio/Proto.java; keep both in sync.
+"""
+import argparse
+import collections
+import ctypes
+import ctypes.util
+import hashlib
+import hmac
+import os
+import secrets
+import socket
+import struct
+import sys
+import threading
+import time
+
+try:
+    from cryptography.exceptions import InvalidTag
+    from cryptography.hazmat.primitives.ciphers.aead import AESGCM
+except ImportError:
+    sys.exit("phone-relay: needs the 'cryptography' module (Arch: sudo pacman -S python-cryptography)")
+
+VERSION = 1
+ROLE_SPK, ROLE_MIC, ROLE_CAM, ROLE_AUDIO = 1, 2, 3, 4
+ROLE_NAMES = {ROLE_SPK: "PC audio -> phone", ROLE_MIC: "phone mic -> PC",
+              ROLE_CAM: "phone camera -> PC", ROLE_AUDIO: "phone audio -> PC"}
+F_ENCRYPT, F_OPUS = 1, 2
+E_PIN, E_DOWN, E_UNKNOWN, E_BUSY, E_UNSUPPORTED = 1, 2, 3, 4, 5
+HELLO_LEN, CONFIRM_LEN = 1 + 3 + 8 + 256, 1 + 8 + 32
+FRAMES = 240                      # 5 ms at 48 kHz
+IDLE_TIMEOUT = 5.0
+TOS_VOICE = 0xB8                  # DSCP EF: Wi-Fi puts it in the voice queue (WMM AC_VO)
+# one RFCOMM service per stream: a phone can't open two connections to the same channel
+BT_UUID = {ROLE_SPK: "a8f3c5d0-5b1e-4c7a-9e2d-7f10c0de0001",
+           ROLE_MIC: "a8f3c5d0-5b1e-4c7a-9e2d-7f10c0de0002",
+           ROLE_AUDIO: "a8f3c5d0-5b1e-4c7a-9e2d-7f10c0de0004"}
+
+# ---------------------------------------------------------------- SPAKE2 (see Proto.java)
+P = int(
+    "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A0879"
+    "8E3404DDEF9519B3CD3A431B302B0A6DF25F14374FE1356D6D51C245E485B576625E7EC6F44C42E9A637ED6B"
+    "0BFF5CB6F406B7EDEE386BFB5A899FA5AE9F24117C4B1FE649286651ECE45B3DC2007CB8A163BF0598DA4836"
+    "1C55D39A69163FA8FD24CF5F83655D23DCA3AD961C62F356208552BB9ED529077096966D670C354E4ABC9804"
+    "F1746C08CA18217C32905E462E36CE3BE39E772C180E86039B2783A2EC07A28FB5C55DF06F4C52C9DE2BCBF6"
+    "955817183995497CEA956AE515D2261898FA051015728E5A8AACAA68FFFFFFFFFFFFFFFF", 16)
+Q = P >> 1
+G = 4
+
+
+def sha256(*parts):
+    h = hashlib.sha256()
+    for p in parts:
+        h.update(p)
+    return h.digest()
+
+
+def hash_to_group(label):
+    wide = b"".join(sha256(label.encode(), bytes([i])) for i in range(9))
+    return pow(int.from_bytes(wide, "big") % P, 2, P)
+
+
+M, N = hash_to_group("UAB-SPAKE2-M"), hash_to_group("UAB-SPAKE2-N")
+
+
+def i2b(v):
+    return v.to_bytes(256, "big")
+
+
+def in_group(v):
+    return 1 < v < P - 1 and pow(v, Q, P) == 1
+
+
+def mac(key, *parts):
+    h = hmac.new(key, digestmod=hashlib.sha256)
+    for p in parts:
+        h.update(p)
+    return h.digest()
+
+
+def transcript(role, flags, sid, X, Y):
+    return b"UAB1" + bytes([VERSION, role, flags]) + sid + X + Y
+
+
+class Keys:
+    def __init__(self, tt, K, w):
+        h = sha256(tt, K, w)
+        self.phone_to_pc = mac(h, b"phone->pc")[:16]
+        self.pc_to_phone = mac(h, b"pc->phone")[:16]
+        self.pc_confirm = mac(mac(h, b"confirm pc"), tt)
+        self.phone_confirm = mac(mac(h, b"confirm phone"), tt)
+
+
+class HandshakeError(Exception):
+    def __init__(self, code):
+        super().__init__(code)
+        self.code = code
+
+
+class Handshaker:
+    """PC side of the PIN check. Wrong PINs slow everybody down: one guess per second at most."""
+
+    def __init__(self, pin):
+        self.w = int.from_bytes(sha256(b"UAB-PIN", pin.encode()), "big") % Q
+        self.m_inv_w = pow(M, (Q - self.w) % Q, P)
+        self.n_w = pow(N, self.w, P)
+        self.lock = threading.Lock()
+        self.last_fail = 0.0
+        self.recent = collections.deque()
+
+    def reply(self, hello):
+        """HELLO -> (role, flags, sid, REPLY bytes, keys). Raises HandshakeError."""
+        if len(hello) != HELLO_LEN or hello[0] != ord("H"):
+            raise HandshakeError(E_UNSUPPORTED)
+        ver, role, flags = hello[1], hello[2], hello[3]
+        sid = hello[4:12]
+        if ver != VERSION or role not in ROLE_NAMES:
+            raise HandshakeError(E_UNSUPPORTED)
+        now = time.monotonic()
+        with self.lock:
+            while self.recent and now - self.recent[0] > 1.0:
+                self.recent.popleft()
+            if now - self.last_fail < 1.0 or len(self.recent) >= 20:
+                raise HandshakeError(E_BUSY)
+            self.recent.append(now)
+        Xb = hello[12:]
+        X = int.from_bytes(Xb, "big")
+        if not in_group(X):
+            raise HandshakeError(E_UNSUPPORTED)
+        y = secrets.randbits(256) + 1
+        Yb = i2b(pow(G, y, P) * self.n_w % P)
+        K = pow(X * self.m_inv_w % P, y, P)
+        keys = Keys(transcript(role, flags, sid, Xb, Yb), i2b(K), i2b(self.w))
+        return role, flags, sid, b"R" + sid + Yb + keys.pc_confirm, keys
+
+    def check(self, keys, confirm):
+        ok = len(confirm) == CONFIRM_LEN and hmac.compare_digest(confirm[9:], keys.phone_confirm)
+        if not ok:
+            with self.lock:
+                self.last_fail = time.monotonic()
+        return ok
+
+
+def error_msg(sid, code):
+    return b"E" + sid + bytes([code])
+
+
+# ---------------------------------------------------------------- Opus (libopus via ctypes)
+class Opus:
+    lib = None
+
+    @classmethod
+    def load(cls):
+        if cls.lib is None:
+            name = ctypes.util.find_library("opus") or "libopus.so.0"
+            lib = ctypes.CDLL(name)
+            c_int, c_ptr, c_buf = ctypes.c_int, ctypes.c_void_p, ctypes.c_char_p
+            lib.opus_encoder_create.restype = c_ptr
+            lib.opus_encoder_create.argtypes = [ctypes.c_int32, c_int, c_int, ctypes.POINTER(c_int)]
+            lib.opus_decoder_create.restype = c_ptr
+            lib.opus_decoder_create.argtypes = [ctypes.c_int32, c_int, ctypes.POINTER(c_int)]
+            lib.opus_encode.argtypes = [c_ptr, c_buf, c_int, c_buf, ctypes.c_int32]
+            lib.opus_decode.argtypes = [c_ptr, c_buf, ctypes.c_int32, c_buf, c_int, c_int]
+            lib.opus_encoder_destroy.argtypes = [c_ptr]
+            lib.opus_decoder_destroy.argtypes = [c_ptr]
+            cls.lib = lib
+        return cls.lib
+
+
+class Encoder:
+    def __init__(self, channels, bitrate):
+        lib = Opus.load()
+        err = ctypes.c_int()
+        self.h = lib.opus_encoder_create(48000, channels, 2051, ctypes.byref(err))   # RESTRICTED_LOWDELAY
+        if err.value != 0 or not self.h:
+            raise RuntimeError(f"opus_encoder_create failed ({err.value})")
+        lib.opus_encoder_ctl(ctypes.c_void_p(self.h), ctypes.c_int(4002), ctypes.c_int32(bitrate))   # SET_BITRATE
+        self.out = ctypes.create_string_buffer(1500)
+
+    def encode(self, pcm):
+        n = Opus.lib.opus_encode(self.h, pcm, FRAMES, self.out, len(self.out))
+        if n < 0:
+            raise RuntimeError(f"opus_encode failed ({n})")
+        return self.out.raw[:n]
+
+    def __del__(self):   # when the session is gone: never while its thread may still encode
+        if self.h:
+            Opus.lib.opus_encoder_destroy(self.h)
+            self.h = None
+
+
+class Decoder:
+    def __init__(self, channels):
+        lib = Opus.load()
+        err = ctypes.c_int()
+        self.h = lib.opus_decoder_create(48000, channels, ctypes.byref(err))
+        if err.value != 0 or not self.h:
+            raise RuntimeError(f"opus_decoder_create failed ({err.value})")
+        self.size = FRAMES * channels * 2
+        self.out = ctypes.create_string_buffer(self.size)
+
+    def decode(self, pkt):
+        """pkt None = lost packet: conceal it."""
+        n = Opus.lib.opus_decode(self.h, pkt, len(pkt) if pkt else 0, self.out, FRAMES, 0)
+        return self.out.raw[:self.size] if n > 0 else bytes(self.size)
+
+    def __del__(self):
+        if self.h:
+            Opus.lib.opus_decoder_destroy(self.h)
+            self.h = None
+
+
+# ---------------------------------------------------------------- sessions
+def log(msg):
+    print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
+
+
+class Session:
+    """One authenticated stream with the phone. send(msg) puts one message on the link."""
+
+    def __init__(self, relay, role, flags, sid, keys, local, send, label, udp):
+        self.relay, self.role, self.flags, self.sid = relay, role, flags, sid
+        self.local, self.send, self.label, self.udp = local, send, label, udp
+        self.tx = AESGCM(keys.pc_to_phone) if flags & F_ENCRYPT else None
+        self.rx = AESGCM(keys.phone_to_pc) if flags & F_ENCRYPT else None
+        self.seq_out = 0
+        self.last_in = None
+        self.last_seen = time.monotonic()
+        self.alive = True
+        self.closed = False
+        self.lock = threading.Lock()
+        channels = 1 if role == ROLE_MIC else 2
+        self.frame_bytes = FRAMES * channels * 2
+        opus = bool(flags & F_OPUS) and role != ROLE_CAM
+        self.enc = Encoder(channels, 160000) if opus and role == ROLE_SPK else None
+        self.dec = Decoder(channels) if opus and role in (ROLE_MIC, ROLE_AUDIO) else None
+        log(f"{label}: {ROLE_NAMES[role]} connected"
+            f" ({'opus' if opus else 'pcm' if role != ROLE_CAM else 'h264'},"
+            f" {'encrypted' if self.tx else 'NOT encrypted'})")
+
+    def start(self):
+        """After the OK went out, so the phone never sees data before it."""
+        if self.role == ROLE_SPK:
+            threading.Thread(target=self._pump, daemon=True).start()
+
+    @staticmethod
+    def nonce(seq):
+        return bytes(8) + struct.pack(">I", seq)
+
+    def send_data(self, payload):
+        with self.lock:
+            seq = self.seq_out & 0xFFFFFFFF
+            self.seq_out += 1
+        hdr = b"D" + struct.pack(">I", seq)
+        body = self.tx.encrypt(self.nonce(seq), payload, hdr) if self.tx else payload
+        self.send(hdr + body)
+
+    def on_data(self, msg):
+        if len(msg) < 5:
+            return
+        seq = struct.unpack_from(">I", msg, 1)[0]
+        gap = 0
+        if self.last_in is not None:
+            d = (seq - self.last_in) & 0xFFFFFFFF
+            if d == 0 or d > 0x80000000:          # duplicate, late or replayed
+                return
+            gap = d - 1
+        try:
+            payload = self.rx.decrypt(self.nonce(seq), msg[5:], msg[:5]) if self.rx else msg[5:]
+        except InvalidTag:
+            return
+        self.last_in = seq
+        self.last_seen = time.monotonic()
+        try:
+            if self.role == ROLE_CAM:
+                self.local.sendall(payload)
+                return
+            if gap and gap <= 50:                 # lost packets: keep the timing, fill the hole
+                for _ in range(min(gap, 8)):
+                    self.local.sendall(self.dec.decode(None) if self.dec else bytes(self.frame_bytes))
+            pcm = self.dec.decode(payload) if self.dec else payload
+            if len(pcm) == self.frame_bytes:
+                self.local.sendall(pcm)
+        except OSError:
+            self.relay.drop(self, "the PC side closed")
+
+    def _pump(self):
+        """PipeWire -> phone, one 5 ms packet at a time."""
+        buf = bytearray()
+        fb = self.frame_bytes
+        while self.alive:
+            try:
+                data = self.local.recv(16384)
+            except OSError:
+                data = b""
+            if not data:
+                break
+            buf += data
+            while len(buf) >= fb:
+                chunk = bytes(buf[:fb])
+                del buf[:fb]
+                try:
+                    self.send_data(self.enc.encode(chunk) if self.enc else chunk)
+                except OSError:
+                    if not self.udp:          # stream link broke; UDP just loses the packet
+                        self.alive = False
+                        break
+        self.relay.drop(self, "PipeWire closed the stream")
+
+    def close(self):
+        """True the first time (the caller logs it)."""
+        with self.lock:
+            if self.closed:
+                return False
+            self.closed = True
+        self.alive = False
+        try:
+            self.local.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
+        self.local.close()
+        return True
+
+
+class Relay:
+    def __init__(self, args, pin):
+        self.args = args
+        self.hs = Handshaker(pin)
+        self.local_ports = {ROLE_SPK: args.spk_port, ROLE_MIC: args.mic_port,
+                            ROLE_CAM: args.cam_port, ROLE_AUDIO: args.audio_port}
+        self.lock = threading.Lock()
+        self.sessions = {}      # udp addr -> Session
+        self.pending = {}       # udp addr -> (sid, role, flags, reply, keys, local, t)
+        self.stream_sessions = set()
+        self.last_unknown = {}
+
+    def open_local(self, role):
+        port = self.local_ports[role]
+        s = socket.create_connection(("127.0.0.1", port), timeout=1)
+        s.settimeout(None)
+        s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        return s
+
+    def drop(self, session, why):
+        with self.lock:
+            for addr, s in list(self.sessions.items()):
+                if s is session:
+                    del self.sessions[addr]
+            self.stream_sessions.discard(session)
+        if session.close():
+            log(f"{session.label}: {ROLE_NAMES[session.role]} disconnected ({why})")
+
+    # ------------------------------------------------ UDP (Wi-Fi, Bluetooth tethering)
+    def serve_udp(self):
+        u = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        u.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        u.setsockopt(socket.IPPROTO_IP, socket.IP_TOS, TOS_VOICE)
+        u.bind((self.args.listen, self.args.port))
+        self.udp = u
+        threading.Thread(target=self.janitor, daemon=True).start()
+        while True:
+            try:
+                msg, addr = u.recvfrom(4096)
+            except OSError:
+                continue
+            if msg:
+                self.on_udp(msg, addr)
+
+    def udp_send(self, addr):
+        def send(m):
+            try:
+                self.udp.sendto(m, addr)
+            except OSError:
+                pass          # Wi-Fi hiccup: the packet is lost, the stream goes on
+        return send
+
+    def on_udp(self, msg, addr):
+        kind = msg[0]
+        label = f"{self.args.label} {addr[0]}"
+        if kind == ord("D"):
+            s = self.sessions.get(addr)
+            if s:
+                s.on_data(msg)
+            else:
+                self.unknown(addr)
+        elif kind == ord("P"):
+            s = self.sessions.get(addr)
+            if s:
+                s.last_seen = time.monotonic()
+            else:
+                self.unknown(addr)
+        elif kind == ord("H"):
+            sid = msg[4:12]
+            p = self.pending.get(addr)
+            if p and p[0] == sid:                       # retransmitted HELLO
+                self.udp_send(addr)(p[3])
+                return
+            s = self.sessions.get(addr)
+            if s and s.sid == sid:
+                return
+            try:
+                role, flags, sid, reply, keys = self.hs.reply(msg)
+                if role == ROLE_CAM:                    # the camera goes over TCP (lossless)
+                    raise HandshakeError(E_UNSUPPORTED)
+                try:
+                    local = self.open_local(role)
+                except OSError:
+                    raise HandshakeError(E_DOWN)
+            except HandshakeError as e:
+                self.udp_send(addr)(error_msg(sid, e.code))
+                if e.code == E_DOWN:
+                    log(f"{label}: {ROLE_NAMES.get(msg[2], '?')}: nothing listening on 127.0.0.1:"
+                        f"{self.local_ports.get(msg[2])}")
+                return
+            if p:
+                p[5].close()
+            self.pending[addr] = (sid, role, flags, reply, keys, local, time.monotonic())
+            self.udp_send(addr)(reply)
+        elif kind == ord("C"):
+            sid = msg[1:9]
+            s = self.sessions.get(addr)
+            if s and s.sid == sid:                      # our OK got lost
+                self.udp_send(addr)(b"O" + sid)
+                return
+            p = self.pending.get(addr)
+            if not p or p[0] != sid:
+                self.udp_send(addr)(error_msg(sid, E_UNKNOWN))
+                return
+            del self.pending[addr]
+            _, role, flags, _, keys, local, _ = p
+            if not self.hs.check(keys, msg):
+                local.close()
+                log(f"{label}: wrong PIN")
+                self.udp_send(addr)(error_msg(sid, E_PIN))
+                return
+            old = self.sessions.get(addr)
+            if old:
+                self.drop(old, "replaced")
+            s = Session(self, role, flags, sid, keys, local, self.udp_send(addr), label, True)
+            with self.lock:
+                self.sessions[addr] = s
+            self.udp_send(addr)(b"O" + sid)
+            s.start()
+        elif kind == ord("B"):
+            s = self.sessions.get(addr)
+            if s:
+                self.drop(s, "stopped on the phone")
+        elif kind == ord("W"):                          # discovery broadcast
+            self.udp_send(addr)(b"w")
+
+    def unknown(self, addr):
+        """Data from a phone we don't know (relay restarted?): tell it to shake hands again."""
+        now = time.monotonic()
+        if now - self.last_unknown.get(addr, 0) > 1.0:
+            self.last_unknown[addr] = now
+            self.udp_send(addr)(error_msg(bytes(8), E_UNKNOWN))
+
+    def janitor(self):
+        while True:
+            time.sleep(1)
+            now = time.monotonic()
+            for addr, s in list(self.sessions.items()):
+                if now - s.last_seen > IDLE_TIMEOUT:
+                    self.drop(s, "phone stopped answering")
+                else:
+                    self.udp_send(addr)(b"P")
+            for addr, p in list(self.pending.items()):
+                if now - p[6] > 10:
+                    self.pending.pop(addr, None)
+                    p[5].close()
+            if len(self.last_unknown) > 1000:
+                self.last_unknown.clear()
+
+    # ------------------------------------------------ streams (TCP camera, Bluetooth RFCOMM)
+    def serve_tcp(self):
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        srv.bind((self.args.listen, self.args.port))
+        srv.listen(4)
+        while True:
+            conn, addr = srv.accept()
+            conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            threading.Thread(target=self.serve_stream,
+                             args=(conn, {ROLE_CAM}, f"{self.args.label} {addr[0]}"), daemon=True).start()
+
+    def serve_stream(self, conn, roles, label):
+        """One connection = one stream. Messages are framed as [length u32][message]."""
+        lock = threading.Lock()
+
+        def send(m):
+            with lock:
+                conn.sendall(struct.pack(">I", len(m)) + m)
+
+        def read():
+            n = struct.unpack(">I", recv_exact(conn, 4))[0]
+            if n > (8 << 20):
+                raise ValueError("message too big")
+            return recv_exact(conn, n)
+
+        session = None
+        try:
+            conn.settimeout(10)
+            hello = read()
+            sid = hello[4:12]
+            try:
+                role, flags, sid, reply, keys = self.hs.reply(hello)
+                if role not in roles:
+                    raise HandshakeError(E_UNSUPPORTED)
+                try:
+                    local = self.open_local(role)
+                except OSError:
+                    raise HandshakeError(E_DOWN)
+            except HandshakeError as e:
+                send(error_msg(sid, e.code))
+                return
+            send(reply)
+            confirm = read()
+            if not self.hs.check(keys, confirm):
+                local.close()
+                log(f"{label}: wrong PIN")
+                send(error_msg(sid, E_PIN))
+                return
+            conn.settimeout(None)
+            send(b"O" + sid)
+            session = Session(self, role, flags, sid, keys, local, send, label, False)
+            with self.lock:
+                self.stream_sessions.add(session)
+            session.start()
+            if role == ROLE_SPK:      # nothing comes back on this stream: wait for it to close
+                while session.alive and conn.recv(64):
+                    pass
+            else:
+                while session.alive:
+                    m = read()
+                    if m[:1] == b"D":
+                        session.on_data(m)
+                    elif m[:1] == b"B":
+                        break
+        except (OSError, EOFError, ValueError, struct.error):
+            pass
+        finally:
+            if session:
+                self.drop(session, "connection closed")
+            try:
+                conn.close()
+            except OSError:
+                pass
+
+    def serve_bluetooth(self):
+        try:
+            import dbus
+            import dbus.mainloop.glib
+            import dbus.service
+            from gi.repository import GLib
+        except ImportError:
+            sys.exit("phone-relay: Bluetooth direct needs python-dbus and python-gobject")
+        dbus.mainloop.glib.DBusGMainLoop(set_as_default=True)
+        bus = dbus.SystemBus()
+        relay = self
+
+        class Profile(dbus.service.Object):
+            def __init__(self, path, role):
+                super().__init__(bus, path)
+                self.role = role
+
+            @dbus.service.method("org.bluez.Profile1", in_signature="", out_signature="")
+            def Release(self):
+                pass
+
+            @dbus.service.method("org.bluez.Profile1", in_signature="oha{sv}", out_signature="")
+            def NewConnection(self, device, fd, props):
+                sock = socket.socket(fileno=fd.take())
+                label = "bluetooth " + str(device).rsplit("dev_", 1)[-1].replace("_", ":")
+                threading.Thread(target=relay.serve_stream, args=(sock, {self.role}, label),
+                                 daemon=True).start()
+
+            @dbus.service.method("org.bluez.Profile1", in_signature="o", out_signature="")
+            def RequestDisconnection(self, device):
+                pass
+
+        mgr = dbus.Interface(bus.get_object("org.bluez", "/org/bluez"), "org.bluez.ProfileManager1")
+        self.profiles = []
+        for role, uuid in BT_UUID.items():
+            path = f"/dev/gabriwar/usbaudio/role{role}"
+            self.profiles.append(Profile(path, role))
+            try:
+                mgr.RegisterProfile(path, uuid, {
+                    "Name": f"USB Audio Bridge ({ROLE_NAMES[role]})",
+                    "Role": "server",
+                    "RequireAuthentication": dbus.Boolean(True),
+                    "RequireAuthorization": dbus.Boolean(False),
+                })
+            except dbus.exceptions.DBusException as e:
+                sys.exit(f"phone-relay: can't register the Bluetooth service: {e.get_dbus_message()}")
+        threading.Thread(target=GLib.MainLoop().run, daemon=True).start()
+
+
+def recv_exact(sock, n):
+    buf = bytearray()
+    while len(buf) < n:
+        chunk = sock.recv(n - len(buf))
+        if not chunk:
+            raise EOFError
+        buf += chunk
+    return bytes(buf)
+
+
+def load_pin(path):
+    try:
+        with open(path) as f:
+            pin = f.read().strip()
+        if pin:
+            return pin
+    except FileNotFoundError:
+        pass
+    pin = f"{secrets.randbelow(10**6):06d}"
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        f.write(pin + "\n")
+    return pin
+
+
+def main():
+    cfg = os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config")
+    ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
+    ap.add_argument("--port", type=int, default=12350, help="UDP + TCP port on the network side")
+    ap.add_argument("--listen", default="0.0.0.0", help="address to listen on (default: all)")
+    ap.add_argument("--bt", action="store_true", help="also accept Bluetooth direct (RFCOMM)")
+    ap.add_argument("--no-net", action="store_true", help="don't listen on the network")
+    ap.add_argument("--label", default="wifi", help="name for the network link in the log")
+    ap.add_argument("--pin-file", default=os.path.join(cfg, "phone-bridge", "pin"))
+    ap.add_argument("--spk-port", type=int, default=12345)
+    ap.add_argument("--mic-port", type=int, default=12346)
+    ap.add_argument("--cam-port", type=int, default=12347)
+    ap.add_argument("--audio-port", type=int, default=12348)
+    args = ap.parse_args()
+
+    pin = load_pin(args.pin_file)
+    relay = Relay(args, pin)
+    try:
+        Opus.load()
+    except OSError:
+        log("libopus not found: only PCM works (install opus)")
+    if args.bt:
+        relay.serve_bluetooth()
+        log("bluetooth direct: ready (pair the phone with this PC first)")
+    if not args.no_net:
+        threading.Thread(target=relay.serve_tcp, daemon=True).start()
+        log(f"network: listening on {args.listen}:{args.port} (udp audio, tcp camera)")
+    log(f"PIN: {pin}")
+    try:
+        if args.no_net:
+            threading.Event().wait()
+        else:
+            relay.serve_udp()
+    except KeyboardInterrupt:
+        pass
+    except OSError as e:
+        sys.exit(f"phone-relay: can't listen on {args.listen}:{args.port}: {e}")
+
+
+if __name__ == "__main__":
+    main()

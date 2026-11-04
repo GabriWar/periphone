@@ -17,6 +17,10 @@ done
 for cmd in ffmpeg python3; do
     if command -v "$cmd" >/dev/null; then ok "$cmd"; else warn "$cmd missing (only needed for the camera)"; fi
 done
+if python3 -c 'import cryptography' 2>/dev/null; then ok "python cryptography"
+else warn "python-cryptography missing (only needed for Wi-Fi/Bluetooth)"; fi
+if python3 -c 'import dbus, gi' 2>/dev/null; then ok "python dbus + gobject"
+else warn "python-dbus / python-gobject missing (only needed for Bluetooth direct)"; fi
 
 echo "== PipeWire configs -> $CONF_DIR"
 mkdir -p "$CONF_DIR"

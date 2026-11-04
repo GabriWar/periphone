@@ -22,6 +22,7 @@ import android.util.Size;
 import android.view.OrientationEventListener;
 import android.view.Surface;
 
+import java.io.Closeable;
 import java.io.EOFException;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -38,7 +39,8 @@ import java.util.concurrent.TimeUnit;
 /**
  * Phone camera -> PC. Camera2 renders straight into the hardware H.264 encoder's input surface;
  * the encoded stream goes to the PC (pc/bin/phone-cam), which decodes it into a v4l2loopback
- * webcam.
+ * webcam. Over the USB tunnel the bytes below go straight to phone-cam; over Wi-Fi each write is
+ * one sealed message to phone-relay (TCP, see Remote), which hands the same bytes to phone-cam.
  *
  * Wire format, all big endian, a sequence of packets: [type u8][length u32][payload]
  *   CONFIG (1): width u16, height u16, fps u16, rotation u16, flags u8
@@ -58,7 +60,8 @@ final class CameraPipe extends Thread {
     private final int port, wantW, wantH, wantFps, quality, rotSetting;
     private final boolean mirror;
     private volatile boolean run = true;
-    private volatile Socket sock;
+    private volatile Closeable sock;    // Socket (USB) or Remote (Wi-Fi)
+    private final Cfg.Link link;
 
     private HandlerThread camThread;
     private Handler camHandler;
@@ -71,9 +74,11 @@ final class CameraPipe extends Thread {
     private volatile String camFailure;   // set by camera callbacks
     private boolean probed, configSent;    // PC answered / this connection got as far as streaming
 
-    CameraPipe(Context ctx, int port, String size, int fps, int quality, int rotSetting, boolean mirror) {
+    CameraPipe(Context ctx, int port, String size, int fps, int quality, int rotSetting, boolean mirror,
+               Cfg.Link link) {
         super("cam-pipe");
         this.ctx = ctx;
+        this.link = link;
         this.port = port;
         int[] wh = parseSize(size);
         this.wantW = wh[0];
@@ -95,7 +100,7 @@ final class CameraPipe extends Thread {
 
     void shutdown() {
         run = false;
-        Socket s = sock;
+        Closeable s = sock;
         if (s != null) {
             try { s.close(); } catch (IOException ignored) {}
         }
@@ -187,16 +192,34 @@ final class CameraPipe extends Thread {
 
         try {
             while (run) {
-                Socket s = new Socket();
-                sock = s;
                 probed = configSent = false;
+                Closeable s = null;
                 try {
-                    s.setSendBufferSize(64 * 1024);
-                    s.connect(new InetSocketAddress("127.0.0.1", port), 1000);
-                    s.setTcpNoDelay(true);
-                    Io.probe(s);
+                    if (link.mode == Cfg.LINK_BT) throw new IOException(ctx.getString(R.string.err_cam_bt));
+                    OutputStream out;
+                    if (link.usb()) {
+                        Socket u = new Socket();
+                        sock = s = u;
+                        u.setSendBufferSize(64 * 1024);
+                        u.connect(new InetSocketAddress("127.0.0.1", port), 1000);
+                        u.setTcpNoDelay(true);
+                        Io.probe(u);
+                        out = u.getOutputStream();
+                    } else {
+                        final Remote r = new Remote(ctx, link, Proto.ROLE_CAM);
+                        sock = s = r;
+                        r.connect();
+                        out = new OutputStream() {
+                            @Override public void write(int b) throws IOException {
+                                r.send(new byte[]{(byte) b}, 0, 1);
+                            }
+                            @Override public void write(byte[] b, int off, int len) throws IOException {
+                                r.send(b, off, len);
+                            }
+                        };
+                    }
                     probed = true;
-                    stream(s.getOutputStream());
+                    stream(out);
                 } catch (ConnectException e) {
                     if (run) Stats.camError = ctx.getString(R.string.err_no_tunnel, port);
                 } catch (EOFException | SocketException e) {
@@ -208,11 +231,13 @@ final class CameraPipe extends Thread {
                 } finally {
                     Stats.camConnected = false;
                     sock = null;
-                    try { s.close(); } catch (IOException ignored) {}
+                    if (s != null) {
+                        try { s.close(); } catch (IOException ignored) {}
+                    }
                 }
                 if (run) {
                     // failed before streaming (camera busy, size rejected...): don't hammer it
-                    long wait = probed && !configSent ? 3000 : 400;
+                    long wait = probed && !configSent ? 3000 : link.usb() ? 400 : 1500;
                     try { Thread.sleep(wait); } catch (InterruptedException e) { break; }
                 }
             }

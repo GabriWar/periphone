@@ -26,6 +26,38 @@ echo "build-tools $BT_VER, $PLAT, $("$JAVAC" -version 2>&1)"
 
 rm -rf "$B"; mkdir -p "$B"/{res,gen,classes,dex}
 
+# ---- native: libopus (Bluetooth codec) + JNI glue, cached in .cache/ (needs the NDK + cmake)
+OPUS_VER=1.6.1
+OPUS_SHA=6ffcb593207be92584df15b32466ed64bbec99109f007c82205f0194572411a1
+ABIS="arm64-v8a armeabi-v7a"
+NDK="${ANDROID_NDK:-$SDK/ndk/$(newest "$SDK/ndk" '^[0-9.]+$')}"
+[ -f "$NDK/build/cmake/android.toolchain.cmake" ] \
+    || { echo "error: Android NDK not found (sdkmanager 'ndk;27.1.12297006', or set ANDROID_NDK)" >&2; exit 1; }
+CMAKE="$(ls -d "$SDK"/cmake/*/bin/cmake 2>/dev/null | sort -V | tail -1 || true)"; CMAKE="${CMAKE:-cmake}"
+C=.cache
+mkdir -p "$C"
+if [ ! -d "$C/opus-$OPUS_VER" ]; then
+    curl -fsSL -o "$C/opus.tar.gz" "https://downloads.xiph.org/releases/opus/opus-$OPUS_VER.tar.gz"
+    echo "$OPUS_SHA  $C/opus.tar.gz" | sha256sum -c --quiet - || { rm -f "$C/opus.tar.gz"; exit 1; }
+    tar -xzf "$C/opus.tar.gz" -C "$C" && rm "$C/opus.tar.gz"
+fi
+TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin"
+for abi in $ABIS; do
+    ob="$C/opus-build-$abi"
+    if [ ! -f "$ob/libopus.a" ]; then
+        "$CMAKE" -S "$C/opus-$OPUS_VER" -B "$ob" -G Ninja -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI="$abi" -DANDROID_PLATFORM=26 \
+            -DOPUS_BUILD_PROGRAMS=OFF -DOPUS_BUILD_TESTING=OFF -DOPUS_DRED=OFF -DOPUS_OSCE=OFF >/dev/null
+        "$CMAKE" --build "$ob" >/dev/null
+    fi
+    case $abi in arm64-v8a) tgt=aarch64-linux-android26 ;; armeabi-v7a) tgt=armv7a-linux-androideabi26 ;; esac
+    mkdir -p "$B/lib/$abi"
+    "$TC/clang" --target="$tgt" -O2 -fPIC -shared -I"$C/opus-$OPUS_VER/include" \
+        -Wl,-z,max-page-size=16384 -Wl,--gc-sections -s \
+        -o "$B/lib/$abi/libuabopus.so" jni/opus_jni.c "$ob/libopus.a" -lm
+done
+
 "$BT/aapt2" compile --dir res -o "$B/res"
 "$BT/aapt2" link -o "$B/base.apk" -I "$AJ" --manifest AndroidManifest.xml \
     --min-sdk-version 26 --target-sdk-version 34 \
@@ -39,6 +71,7 @@ rm -rf "$B"; mkdir -p "$B"/{res,gen,classes,dex}
     $(find "$B/classes" -name '*.class')
 
 (cd "$B/dex" && zip -q ../base.apk classes.dex)
+(cd "$B" && zip -q -0 base.apk lib/*/*.so)   # stored: loaded straight from the APK
 "$BT/zipalign" -f 4 "$B/base.apk" "$B/aligned.apk"
 
 [ -f debug.keystore ] || keytool -genkeypair -keystore debug.keystore \
