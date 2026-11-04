@@ -107,6 +107,13 @@ func openAudio() (*audio, error) {
 			a.prevSink, a.prevSource = f[0], f[1]
 		}
 	}
+	// these names go into module arguments: plain device names only
+	if !deviceName(a.prevSink) {
+		a.prevSink = ""
+	}
+	if !deviceName(a.prevSource) {
+		a.prevSource = ""
+	}
 	if a.prevSink == spkSink || a.prevSink == micSink || a.prevSink == audSink || a.prevSink == "" {
 		a.prevSink = a.firstRealSink()
 	}
@@ -179,12 +186,21 @@ func openAudio() (*audio, error) {
 	return a, nil
 }
 
+func deviceName(s string) bool {
+	for _, r := range s {
+		if !(r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9' || strings.ContainsRune("._:-", r)) {
+			return false
+		}
+	}
+	return true
+}
+
 // firstRealSink: a sink that isn't ours (the speakers to fall back to).
 func (a *audio) firstRealSink() string {
 	var l proto.GetSinkInfoListReply
 	if a.c.RawRequest(&proto.GetSinkInfoList{}, &l) == nil {
 		for _, s := range l {
-			if s.SinkName != spkSink && s.SinkName != micSink && s.SinkName != audSink {
+			if s.SinkName != spkSink && s.SinkName != micSink && s.SinkName != audSink && deviceName(s.SinkName) {
 				return s.SinkName
 			}
 		}

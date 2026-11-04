@@ -75,6 +75,15 @@ func newSession(b *bridge, p *pending, send func([]byte) error, udp bool, label 
 	return s, nil
 }
 
+// checkEncryption: this PC's setting wins; a phone asking for plain streams is refused.
+func (b *bridge) checkEncryption(p *pending, label string) error {
+	if b.opt.Encrypt && p.flags&fEncrypt == 0 {
+		logf("%s: refused %s: the phone has encryption off, this PC requires it", label, roleNames[p.role])
+		return hsError(eUnsupported)
+	}
+	return nil
+}
+
 // start: after the OK went out, so the phone never sees data before it.
 func (s *session) start() {
 	if s.role == roleSpk {
@@ -327,6 +336,9 @@ func (u *udpServer) handle(m []byte, addr *net.UDPAddr) {
 		if err == nil && np.role == roleCam { // the camera goes over TCP (lossless)
 			err = hsError(eUnsupported)
 		}
+		if err == nil {
+			err = u.b.checkEncryption(np, label)
+		}
 		if err == nil && !u.b.wants(np.role) {
 			err = hsError(eDown)
 		}
@@ -509,6 +521,9 @@ func (b *bridge) serveStream(c io.ReadWriteCloser, roles map[byte]bool, label st
 	p, err := b.hs.reply(hello)
 	if err == nil && !roles[p.role] {
 		err = hsError(eUnsupported)
+	}
+	if err == nil {
+		err = b.checkEncryption(p, label)
 	}
 	if err == nil && !b.wants(p.role) {
 		err = hsError(eDown)

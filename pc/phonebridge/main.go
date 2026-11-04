@@ -71,11 +71,20 @@ func configDir() string {
 	return filepath.Join(d, "phone-bridge")
 }
 
+// runtimeDir: lock / state files. XDG_RUNTIME_DIR is private to the user; without it a 0700
+// directory of our own (never the shared /tmp: other users could plant files or symlinks there).
 func runtimeDir() string {
 	if d := os.Getenv("XDG_RUNTIME_DIR"); d != "" {
 		return d
 	}
-	return os.TempDir()
+	d, err := os.UserCacheDir()
+	if err != nil {
+		d = filepath.Join(os.Getenv("HOME"), ".cache")
+	}
+	d = filepath.Join(d, "phonebridge")
+	os.MkdirAll(d, 0o700)
+	os.Chmod(d, 0o700)
+	return d
 }
 
 // loadPIN reads (or creates) the 6-digit PIN the app must know.
