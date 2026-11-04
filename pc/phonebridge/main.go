@@ -30,6 +30,8 @@ usage:
   phonebridge [options]           window + tray icon (running again reopens the window)
   phonebridge --background        tray only (the window opens from the tray)
   phonebridge --no-tray [options] in the terminal, Ctrl-C to stop
+  (the window/tray modes detach: closing the terminal or the window keeps the bridge running;
+   Quit in the window/tray or "phonebridge stop" ends it)
   phonebridge pin [new]           the PIN for Wi-Fi / Bluetooth (new: change it)
   phonebridge install [--autostart]   copy to ~/.local/bin, add to the app menu (and login)
   phonebridge uninstall
@@ -246,6 +248,10 @@ func main() {
 		opt.Encrypt = false
 	}
 
+	if !*noTray && os.Getenv("PHONEBRIDGE_DETACHED") == "" && signalRunning(syscall.SIGUSR1) {
+		fmt.Println("phonebridge is already running: opened its window.")
+		return
+	}
 	lk, err := lock()
 	if err != nil {
 		if !*noTray && signalRunning(syscall.SIGUSR1) {
@@ -262,6 +268,10 @@ func main() {
 	}
 	if len(set) > 0 {
 		saveSettings(opt) // options given here become the window's settings too
+	}
+	if os.Getenv("PHONEBRIDGE_DETACHED") == "" {
+		detach(*background)
+		return
 	}
 	runGUI(opt, !*background)
 }
@@ -310,6 +320,35 @@ func runGUI(opt options, showWindow bool) {
 }
 
 func tick() <-chan time.Time { return time.Tick(time.Second) }
+
+// detach starts this same program again in its own session (closing the terminal won't stop
+// it), output to a log file, and returns at once.
+func detach(background bool) {
+	exe, err := os.Executable()
+	if err != nil {
+		fail(err)
+	}
+	logPath := filepath.Join(runtimeDir(), "phonebridge.log")
+	lf, err := os.OpenFile(logPath, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		fail(err)
+	}
+	defer lf.Close()
+	args := []string{}
+	if background {
+		args = append(args, "--background")
+	}
+	cmd := exec.Command(exe, args...)
+	cmd.Env = append(os.Environ(), "PHONEBRIDGE_DETACHED=1")
+	cmd.Stdout, cmd.Stderr = lf, lf
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	if err := cmd.Start(); err != nil {
+		fail(err)
+	}
+	cmd.Process.Release()
+	fmt.Println("phonebridge is running in the background (tray icon; closing the window keeps it running).")
+	fmt.Println("  window again: phonebridge    stop: phonebridge stop    log:", logPath)
+}
 
 func fail(err error) {
 	fmt.Fprintln(os.Stderr, "error:", err)

@@ -164,7 +164,10 @@
         <option value="6">Voice recognition</option><option value="5">Camcorder</option></select>
       <div class="hint" style="margin-top:10px">Changes restart the bridge and the app on the phone.</div>
     </div>
-    <div style="display:flex; justify-content:flex-end"><button id="quit" class="stop">Quit (put the audio back)</button></div>
+    <div style="display:flex; align-items:center; gap:12px">
+      <span class="hint" style="flex:1">Closing this window keeps the bridge running (tray icon; reopen: run
+        <span class="device">phonebridge</span>). Quit stops it.</span>
+      <button id="quit" class="stop">Quit</button></div>
   </aside>
 </main>
 

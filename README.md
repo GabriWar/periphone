@@ -188,7 +188,8 @@ The Wi-Fi / Bluetooth protocol is documented in `src/dev/gabriwar/usbaudio/Proto
 ## Usage
 
 ```sh
-phonebridge                   # window + tray icon (remembers link and streams)
+phonebridge                   # window + tray icon, detached: closing the terminal or the
+                              # window keeps it running in the tray (log: $XDG_RUNTIME_DIR/phonebridge.log)
 phonebridge --background      # tray only (what the login autostart uses)
 phonebridge --no-tray         # terminal, Ctrl-C to stop
 phonebridge --wifi            # Wi-Fi (also: --usb, --pan [--pan-mac MAC], --bt)
