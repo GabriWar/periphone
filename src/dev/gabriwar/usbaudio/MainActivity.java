@@ -23,6 +23,11 @@ import android.media.AudioDeviceInfo;
 import android.media.AudioManager;
 import android.media.projection.MediaProjectionConfig;
 import android.media.projection.MediaProjectionManager;
+import android.net.Uri;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
+import android.os.PowerManager;
+import android.provider.Settings;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
@@ -814,6 +819,21 @@ public class MainActivity extends Activity {
         });
         advBody.addView(swAwake, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
+        TextView bg = text(getString(R.string.bg_hint), 12, TEXT2, false);
+        bg.setPadding(0, dp(6), 0, dp(6));
+        advBody.addView(bg);
+        Button bgBtn = pillButton();
+        bgBtn.setText(R.string.bg_settings);
+        stylePill(bgBtn, CARD_HI);
+        bgBtn.setOnClickListener(v -> {
+            try {
+                startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                        Uri.parse("package:" + getPackageName())));
+            } catch (ActivityNotFoundException ignored) {
+            }
+        });
+        advBody.addView(bgBtn, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+
         advBody.addView(fieldLabel(R.string.ports));
         LinearLayout ports = row();
         etSpkPort = portField(prefs.getInt(Cfg.K_SPK_PORT, Cfg.DEFAULT_SPK_PORT), R.string.port_out);
@@ -910,11 +930,22 @@ public class MainActivity extends Activity {
     private void showLink() {
         int mode = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB);
         selectSeg(linkSeg, mode);
-        linkDesc.setText(LINK_DESC[mode]);
+        String desc = getString(LINK_DESC[mode]);
+        if (mode == Cfg.LINK_WIFI && on24GHz()) desc += "\n\n" + getString(R.string.wifi_24_warning);
+        linkDesc.setText(desc);
         netBody.setVisibility(mode == Cfg.LINK_USB ? View.GONE : View.VISIBLE);
         hostBox.setVisibility(mode == Cfg.LINK_WIFI || mode == Cfg.LINK_PAN ? View.VISIBLE : View.GONE);
         btBox.setVisibility(mode == Cfg.LINK_BT ? View.VISIBLE : View.GONE);
         if (mode == Cfg.LINK_BT) refreshBt();
+    }
+
+    /** 2.4 GHz Wi-Fi: crowded and slow, measured 100+ ms spikes and 3 % loss vs ~0 on 5 GHz. */
+    @SuppressWarnings("deprecation")   // getConnectionInfo: still the simple way for the band
+    private boolean on24GHz() {
+        WifiManager wm = getApplicationContext().getSystemService(WifiManager.class);
+        WifiInfo wi = wm == null ? null : wm.getConnectionInfo();
+        int f = wi == null ? -1 : wi.getFrequency();
+        return f > 0 && f < 3000;
     }
 
     /** Paired devices to pick the PC from (needs BLUETOOTH_CONNECT on Android 12+). */
@@ -957,8 +988,26 @@ public class MainActivity extends Activity {
         Stats.pcAddr = null;
         Stats.pinFails = 0;
         Stats.pinRetryAt = 0;
+        Stats.pinMismatches = 0;
         Toast.makeText(this, R.string.link_saved, Toast.LENGTH_SHORT).show();
         applyIfRunning();
+    }
+
+    /**
+     * Battery optimization lets the system (and Xiaomi-style ROMs much more) kill the bridge in the
+     * background. Ask once for the exemption; phone-bridge grants it over adb anyway.
+     */
+    @SuppressWarnings("BatteryLife")   // exactly what this app needs: a long-running audio link
+    private void askBatteryExemption() {
+        PowerManager pm = getSystemService(PowerManager.class);
+        if (pm == null || pm.isIgnoringBatteryOptimizations(getPackageName())) return;
+        if (prefs.getBoolean(Cfg.K_BATT_ASKED, false)) return;
+        prefs.edit().putBoolean(Cfg.K_BATT_ASKED, true).apply();
+        try {
+            startActivity(new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,
+                    Uri.parse("package:" + getPackageName())));
+        } catch (ActivityNotFoundException ignored) {
+        }
     }
 
     /** Playback capture needs the screen-capture consent; asked for each session (Android rule). */
@@ -1112,8 +1161,10 @@ public class MainActivity extends Activity {
             clearSco();
             startService(new Intent(this, BridgeService.class).setAction(BridgeService.ACTION_STOP));
         } else {
+            askBatteryExemption();
             Stats.pinFails = 0;              // the user asked: try again right away
             Stats.pinRetryAt = 0;
+            Stats.pinMismatches = 0;
             startBridge();
             if (prefs.getBoolean(Cfg.K_CAP, false)) requestProjection();
         }
@@ -1174,8 +1225,10 @@ public class MainActivity extends Activity {
         Stats.pcAddr = null;
         Stats.pinFails = 0;
         Stats.pinRetryAt = 0;
+        Stats.pinMismatches = 0;
         reflectPrefs();
         camBody.setVisibility(swCam.isChecked() ? View.VISIBLE : View.GONE);
+        askBatteryExemption();
         startBridge();
         if (prefs.getBoolean(Cfg.K_CAP, false)) requestProjection();
     }

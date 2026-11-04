@@ -33,6 +33,7 @@ final class Stats {
     static volatile int spkUnderruns;
     static volatile long spkDroppedMs;
     static volatile int spkQueuedMs;      // delay sitting in our AudioTrack queue
+    static volatile int spkTargetMs;      // cushion the queue is kept around (adapts on Wi-Fi/Bluetooth)
     static volatile int spkLatencyMs;     // queue + what the Android audio stack reports (-1 = unknown)
     static volatile String spkError = "";
 
@@ -60,6 +61,7 @@ final class Stats {
     static volatile InetAddress pcAddr;
     static volatile String linkWhere = "";
     // PIN mismatches in a row and when to try again (back-off, see Remote.wrongPin)
-    static volatile int pinFails;
+    static volatile int pinFails;          // in a row (back-off); a success resets it
+    static volatile int pinMismatches;     // total since the user last tapped Start / changed settings
     static volatile long pinRetryAt;
 }

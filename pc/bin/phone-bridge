@@ -12,7 +12,7 @@
 #       --pan [MAC]         over Bluetooth tethering (turn it on on the phone first; MAC = the
 #                           phone's, to join it with nmcli; default: the only paired device)
 #       --bt                over Bluetooth direct (RFCOMM; pair the phone with the PC first)
-#       --codec auto|pcm|opus   audio codec on Wi-Fi/Bluetooth (auto: pcm on Wi-Fi, opus on Bluetooth)
+#       --codec auto|pcm|opus   audio codec on Wi-Fi/Bluetooth (auto = opus; pcm: no codec, clicks on loss)
 #       --no-encrypt        don't encrypt Wi-Fi/Bluetooth streams (the PIN is still checked)
 #   Streams:
 #   -b, --buffer MS     output buffer 10..200 ms (default: what's saved in the app).
@@ -302,7 +302,18 @@ case "$LINK" in
                 if iw dev "$w" get power_save 2>/dev/null | grep -q ': on'; then
                     echo "tip: $w has power saving on (adds jitter): sudo iw dev $w set power_save off"
                 fi
+                # 2.4 GHz: crowded, slow, 100+ ms spikes and loss; 5 GHz on both ends is clean
+                f=$(iw dev "$w" link 2>/dev/null | awk '/freq:/{print int($2)}')
+                if [ -n "$f" ] && [ "$f" -lt 3000 ]; then
+                    echo "warning: the PC's Wi-Fi ($w) is on 2.4 GHz: expect dropouts and extra delay; use 5 GHz"
+                fi
             done
+            if [ "$ADB" = true ]; then
+                f=$(adb shell dumpsys wifi 2>/dev/null | grep -m1 -oE 'Frequency: [0-9]+' | grep -oE '[0-9]+' || true)
+                if [ -n "$f" ] && [ "$f" -lt 3000 ]; then
+                    echo "warning: the phone's Wi-Fi is on 2.4 GHz: expect dropouts and extra delay; use 5 GHz"
+                fi
+            fi
             # with wireless debugging we know where the phone is: give it our address on that network
             if [ "$ADB" = true ]; then
                 phone_ip=$(adb shell ip -4 -o addr show wlan0 2>/dev/null | awk '{print $4}' | cut -d/ -f1 | head -1 || true)
@@ -334,6 +345,11 @@ if [ "$ADB" = true ]; then
     for perm in RECORD_AUDIO CAMERA POST_NOTIFICATIONS BLUETOOTH_CONNECT; do
         adb shell pm grant "$PKG" "android.permission.$perm" 2>/dev/null || true
     done
+    # keep it alive in the background: no battery optimization, no background restriction,
+    # most active standby bucket (Xiaomi & co. still have their own switch: see the app's Advanced)
+    adb shell dumpsys deviceidle whitelist "+$PKG" >/dev/null 2>&1 || true
+    adb shell cmd appops set "$PKG" RUN_ANY_IN_BACKGROUND allow 2>/dev/null || true
+    adb shell am set-standby-bucket "$PKG" active 2>/dev/null || true
     # lets the phone-audio capture start without the screen-capture prompt (where Android honors it)
     [ "$CAP" = true ] && adb shell appops set "$PKG" PROJECT_MEDIA allow 2>/dev/null || true
     adb shell input keyevent KEYCODE_WAKEUP 2>/dev/null || true

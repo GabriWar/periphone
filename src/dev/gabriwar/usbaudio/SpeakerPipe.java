@@ -57,10 +57,10 @@ final class SpeakerPipe extends Thread {
         interrupt();
     }
 
-    private AudioTrack newTrack() {
+    private AudioTrack newTrack(int maxCushion) {
         int minBuf = AudioTrack.getMinBufferSize(
                 Cfg.RATE, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
-        int size = Math.max(minBuf, FRAME * (4 * cushionFrames + 8 * CHUNK_FRAMES));
+        int size = Math.max(minBuf, FRAME * (4 * maxCushion + 8 * CHUNK_FRAMES));
         return new AudioTrack.Builder()
                 .setAudioAttributes(new AudioAttributes.Builder()
                         .setUsage(AudioAttributes.USAGE_MEDIA)
@@ -87,10 +87,14 @@ final class SpeakerPipe extends Thread {
     public void run() {
         Process.setThreadPriority(Process.THREAD_PRIORITY_URGENT_AUDIO);
         final byte[] buf = new byte[CHUNK + FRAME];      // +1 frame of room for the repeat nudge
-        final byte[] silence = new byte[FRAME * cushionFrames];
+        // Wi-Fi / Bluetooth deliver in clumps (a gap, then a burst): there the cushion adapts.
+        // It grows when the queue runs dry and shrinks back slowly while the network is calm,
+        // never below the buffer setting. USB keeps the fixed cushion.
+        final int floor = cushionFrames;
+        final int ceil = link.usb() ? cushionFrames : Cfg.RATE / 4;   // 250 ms
+        final byte[] silence = new byte[FRAME * ceil];
         final AudioTimestamp ts = new AudioTimestamp();
-        final int hardCap = cushionFrames * 5 / 2 + 2 * CHUNK_FRAMES;
-        final float hi = cushionFrames * 1.75f, lo = cushionFrames * 0.75f;
+        int target = floor;
         long lastLog = 0, lastLatency = 0;
 
         while (run) {
@@ -101,9 +105,11 @@ final class SpeakerPipe extends Thread {
                 c.open();
 
                 long written = 0;                    // frames written to this track
-                float smooth = cushionFrames;        // smoothed queue, in frames
+                float smooth = target;               // smoothed queue, in frames
                 AudioDeviceInfo appliedDev = null;
                 boolean first = true;
+                long winStart = SystemClock.elapsedRealtime(), winMin = Long.MAX_VALUE;
+                boolean winDry = false;
 
                 while (run) {
                     c.read(buf);
@@ -112,14 +118,14 @@ final class SpeakerPipe extends Thread {
                     if (first) {
                         first = false;
                         Stats.spkError = "";
-                        track = newTrack();
+                        track = newTrack(ceil);
                         if (track.getState() != AudioTrack.STATE_INITIALIZED) {
                             throw new IOException(ctx.getString(R.string.err_audio_track, track.getState()));
                         }
                         appliedDev = Stats.outDevice;
                         track.setPreferredDevice(appliedDev);   // null = automatic
-                        track.write(silence, 0, silence.length);  // initial cushion
-                        written = cushionFrames;
+                        track.write(silence, 0, FRAME * target);  // initial cushion
+                        written = target;
                         track.play();
                     }
 
@@ -134,19 +140,54 @@ final class SpeakerPipe extends Thread {
                     smooth += 0.02f * (queued - smooth);
                     Stats.spkQueuedMs = (int) (queued * 1000 / Cfg.RATE);
 
+                    boolean adaptive = ceil > floor;
+                    // USB: the original fixed band. Network: tighter, a late burst must not
+                    // leave the delay high for long
+                    int hardCap = adaptive ? target * 2 + 2 * CHUNK_FRAMES : target * 5 / 2 + 2 * CHUNK_FRAMES;
+                    float hi = adaptive ? target + Math.max(2 * CHUNK_FRAMES, target / 4) : target * 1.75f;
+                    float lo = target * 0.75f;
                     if (queued > hardCap) {                    // burst: cap the latency now
                         Stats.spkDroppedMs += CHUNK_FRAMES * 1000 / Cfg.RATE;
                         smooth = Math.min(smooth, hi);
                         continue;
                     }
                     if (queued < CHUNK_FRAMES) {               // ran dry: rebuild the cushion
-                        track.write(silence, 0, silence.length);
-                        written += cushionFrames;
-                        smooth = cushionFrames;
+                        if (target < ceil) {                   // network gap: keep more from now on
+                            target = Math.min(ceil, target + Math.max(target / 4, 2 * CHUNK_FRAMES));
+                        }
+                        // network: the data is only late and lands right after; half a cushion
+                        // of silence is enough, a full one would stack up with the burst
+                        int fill = adaptive ? Math.max(2 * CHUNK_FRAMES, target / 2) : target;
+                        track.write(silence, 0, FRAME * fill);
+                        written += fill;
+                        smooth = target;
+                        winDry = true;
                     }
+                    winMin = Math.min(winMin, queued);
+                    long t = SystemClock.elapsedRealtime();
+                    if (t - winStart >= 5000) {
+                        // calm for 5 s with room to spare: give back up to 10 ms of delay
+                        if (!winDry && target > floor && winMin > 3 * CHUNK_FRAMES) {
+                            target = (int) Math.max(floor, target - Math.min(winMin - 2 * CHUNK_FRAMES, Cfg.RATE / 100));
+                        }
+                        winStart = t;
+                        winMin = Long.MAX_VALUE;
+                        winDry = false;
+                    }
+                    Stats.spkTargetMs = target * 1000 / Cfg.RATE;
 
                     int frames = CHUNK_FRAMES;
-                    if (smooth > hi) {                         // drift: drop one frame
+                    if (adaptive && queued > target * 3 / 2) {
+                        // well over after a burst: drop 4 frames spread over the chunk (1.7 %
+                        // faster for a moment) to drain ~100 ms in 6 s instead of 25
+                        int out = 0;
+                        for (int f = 0; f < CHUNK_FRAMES; f++) {
+                            if (f % (CHUNK_FRAMES / 4) == CHUNK_FRAMES / 8) continue;
+                            if (out != f) System.arraycopy(buf, f * FRAME, buf, out * FRAME, FRAME);
+                            out++;
+                        }
+                        frames = out;
+                    } else if (smooth > hi) {                  // drift: drop one frame
                         System.arraycopy(buf, (MID + 1) * FRAME, buf, MID * FRAME, (CHUNK_FRAMES - MID - 1) * FRAME);
                         frames--;
                     } else if (smooth < lo) {                  // drift: repeat one frame
@@ -179,7 +220,8 @@ final class SpeakerPipe extends Thread {
                     }
                     if (now - lastLog >= 5000) {
                         lastLog = now;
-                        Log.i("UsbAudio", "spk queuedMs=" + Stats.spkQueuedMs
+                        Log.i("UsbAudio", "spk targetMs=" + Stats.spkTargetMs
+                                + " queuedMs=" + Stats.spkQueuedMs
                                 + " latencyMs=" + Stats.spkLatencyMs
                                 + " underruns=" + Stats.spkUnderruns
                                 + " droppedMs=" + Stats.spkDroppedMs);

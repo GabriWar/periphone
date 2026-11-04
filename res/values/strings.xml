@@ -40,9 +40,10 @@
     <string name="link_pan">BT net</string>
     <string name="link_bt">BT direct</string>
     <string name="link_usb_desc">Through the cable (adb). Lowest delay, nothing to set up here. On the PC: phone-bridge</string>
-    <string name="link_wifi_desc">Same Wi-Fi as the PC, raw audio over UDP (a few ms more than USB). On the PC: phone-bridge --wifi</string>
+    <string name="link_wifi_desc">Same Wi-Fi as the PC, audio over UDP. The delay adapts to how steady the Wi-Fi is. On the PC: phone-bridge --wifi</string>
     <string name="link_pan_desc">Bluetooth tethering: turn it on in Settings › Network › Hotspot &amp; tethering. Audio is compressed (Opus). On the PC: phone-bridge --pan</string>
     <string name="link_bt_desc">Straight to the paired PC over Bluetooth, no tethering. Audio is compressed (Opus); no camera (too little bandwidth). On the PC: phone-bridge --bt</string>
+    <string name="wifi_24_warning">⚠ This phone is on 2.4 GHz Wi-Fi: expect dropouts and extra delay. Put the phone and the PC on 5 GHz.</string>
     <string name="pc_address">PC address</string>
     <string name="pc_address_hint">Empty = find it automatically</string>
     <string name="bt_pc">PC (paired device)</string>
@@ -51,8 +52,8 @@
     <string name="pin_hint">6 digits</string>
     <string name="encrypt">Encrypt (AES-128-GCM)</string>
     <string name="codec">Audio codec</string>
-    <string name="codec_auto">Automatic (raw on Wi-Fi, Opus on Bluetooth)</string>
-    <string name="codec_pcm">Raw PCM (best quality, ~1.5 Mbit/s)</string>
+    <string name="codec_auto">Automatic (Opus: best on wireless)</string>
+    <string name="codec_pcm">Raw PCM (no codec, ~1.5 Mbit/s, clicks on packet loss)</string>
     <string name="codec_opus">Opus 5 ms (light, ~160 kbit/s)</string>
     <string name="save_link">Save address and PIN</string>
     <string name="link_saved">Saved</string>
@@ -119,6 +120,8 @@
     <!-- advanced -->
     <string name="advanced">Advanced</string>
     <string name="keep_awake">Keep the screen on while the app is open</string>
+    <string name="bg_hint">If the system kills the bridge in the background: in the app settings set Battery saver to \"No restrictions\" and turn Autostart on (Xiaomi, Oppo, Huawei...). Also lock the app in Recents.</string>
+    <string name="bg_settings">Open the app\'s settings</string>
     <string name="ports">Ports (the PC must use the same ones)</string>
     <string name="port_out">Output</string>
     <string name="port_mic">Mic</string>
@@ -180,6 +183,7 @@
     <string name="err_pc_no_answer">The PC at %1$s doesn\'t answer (phone-bridge --wifi running? firewall allows port 12350?)</string>
     <string name="err_relay_down">Nothing is listening on %1$s:12350. Run phone-bridge --wifi on the PC.</string>
     <string name="err_wrong_pin">Wrong PIN: use the one phone-bridge shows on the PC</string>
+    <string name="err_wrong_pin_stopped">Wrong PIN too many times, stopped trying: fix the PIN or tap Stop and Start</string>
     <string name="err_wrong_pin_wait">Wrong PIN: next try in %1$d s (fix the PIN, or tap Stop and Start)</string>
     <string name="err_pc_side_down">The PC side of this stream isn\'t running (PipeWire configs / camera receiver?)</string>
     <string name="err_pc_busy">The PC is slowing down attempts after a wrong PIN; retrying…</string>

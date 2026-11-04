@@ -8,6 +8,7 @@ import java.io.InputStream;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
 import java.net.Socket;
+import java.util.ArrayDeque;
 import java.util.Arrays;
 
 /**
@@ -27,8 +28,10 @@ final class AudioLink implements Closeable {
     private InputStream in;
     private OutputStream out;
     private long enc, dec;
-    private final byte[] pkt = new byte[2048], stash = new byte[2048];
-    private int conceal, stashLen = -1;
+    private static final byte[] LOST = new byte[0];
+    private final byte[] pkt = new byte[4096], red = new byte[4096];
+    private final ArrayDeque<byte[]> pending = new ArrayDeque<>();   // to play next; LOST = conceal
+    private byte[] prev = LOST;              // last chunk sent, repeated in the next packet
 
     AudioLink(Context ctx, Cfg.Link link, int role, int usbPort, int channels) {
         this.ctx = ctx;
@@ -73,27 +76,29 @@ final class AudioLink implements Closeable {
             Io.readFully(in, pcm, chunk);
             return;
         }
-        if (conceal > 0) {
-            conceal--;
-            fill(null, 0, pcm);
-            return;
-        }
-        if (stashLen >= 0) {
-            int n = stashLen;
-            stashLen = -1;
-            if (fill(stash, n, pcm)) return;
-        }
         while (true) {
+            byte[] p = pending.poll();
+            if (p != null) {
+                if (fill(p == LOST ? null : p, p.length, pcm)) return;
+                continue;
+            }
             int n = remote.recv(pkt);
             int g = remote.gap();
-            if (g > 0 && g <= 8) {         // lost packets: conceal them first, play this one after
-                System.arraycopy(pkt, 0, stash, 0, n);
-                stashLen = n;
-                conceal = g - 1;
-                fill(null, 0, pcm);
-                return;
+            byte[] cur, before = null;
+            if (remote.redundant) {
+                if (n < 2) continue;
+                int cl = ((pkt[0] & 0xff) << 8) | (pkt[1] & 0xff);
+                if (2 + cl > n) continue;
+                cur = Arrays.copyOfRange(pkt, 2, 2 + cl);
+                if (n > 2 + cl) before = Arrays.copyOfRange(pkt, 2 + cl, n);
+            } else {
+                cur = Arrays.copyOf(pkt, n);
             }
-            if (fill(pkt, n, pcm)) return;
+            if (g > 0 && g <= 8) {         // lost packets: the last one comes back from this packet,
+                for (int i = before != null ? 1 : 0; i < g; i++) pending.add(LOST);   // others concealed
+                if (before != null) pending.add(before);
+            }
+            pending.add(cur);
         }
     }
 
@@ -114,12 +119,28 @@ final class AudioLink implements Closeable {
     void write(byte[] pcm) throws IOException {
         if (usb != null) {
             out.write(pcm, 0, chunk);
-        } else if (enc != 0) {
-            int n = Opus.encode(enc, pcm, FRAMES, pkt);
-            if (n < 0) throw new IOException("Opus encode error " + n);
-            remote.send(pkt, 0, n);
         } else {
-            remote.send(pcm, 0, chunk);
+            byte[] cur;
+            if (enc != 0) {
+                int n = Opus.encode(enc, pcm, FRAMES, pkt);
+                if (n < 0) throw new IOException("Opus encode error " + n);
+                cur = Arrays.copyOf(pkt, n);
+            } else {
+                cur = Arrays.copyOf(pcm, chunk);
+            }
+            if (remote.redundant) {
+                // the copy only if the packet stays under the Wi-Fi MTU (a fragmented one is
+                // lost when either half is): always with Opus, not with raw stereo
+                int extra = 2 + cur.length + prev.length <= Proto.MAX_REDUNDANT ? prev.length : 0;
+                red[0] = (byte) (cur.length >>> 8);
+                red[1] = (byte) cur.length;
+                System.arraycopy(cur, 0, red, 2, cur.length);
+                System.arraycopy(prev, 0, red, 2 + cur.length, extra);
+                remote.send(red, 0, 2 + cur.length + extra);
+                prev = cur;
+            } else {
+                remote.send(cur, 0, cur.length);
+            }
         }
     }
 

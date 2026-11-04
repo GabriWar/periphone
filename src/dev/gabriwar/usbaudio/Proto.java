@@ -24,6 +24,8 @@ import javax.crypto.spec.SecretKeySpec;
  *   OK      'O' | sid(8)                                              PC -> phone
  *   ERROR   'E' | sid(8) | code(1)                                    PC -> phone
  *   DATA    'D' | seq(4) | payload  (+16 byte GCM tag when encrypted)
+ *           audio with F_REDUNDANT (UDP): payload = curLen(2) | current chunk | previous chunk,
+ *           so one lost packet is rebuilt exactly from the next one
  *   PING    'P'          keepalive (UDP), both ways
  *   BYE     'B'          phone is leaving
  *   WHO     'W'          phone looking for the PC (UDP broadcast); the PC answers 'w'
@@ -41,10 +43,11 @@ final class Proto {
 
     static final int VERSION = 1;
     static final int ROLE_SPK = 1, ROLE_MIC = 2, ROLE_CAM = 3, ROLE_AUDIO = 4;
-    static final int F_ENCRYPT = 1, F_OPUS = 2;
+    static final int F_ENCRYPT = 1, F_OPUS = 2, F_REDUNDANT = 4;
     static final int E_PIN = 1, E_DOWN = 2, E_UNKNOWN = 3, E_BUSY = 4, E_UNSUPPORTED = 5;
     static final int HELLO_LEN = 1 + 3 + 8 + 256, REPLY_LEN = 1 + 8 + 256 + 32, CONFIRM_LEN = 1 + 8 + 32;
     static final int TAG = 16, HDR = 5;
+    static final int MAX_REDUNDANT = 1400;    // payload with the previous chunk: stays under the MTU
 
     static final BigInteger P = new BigInteger(
             "FFFFFFFFFFFFFFFFC90FDAA22168C234C4C6628B80DC1CD129024E088A67CC74020BBEA63B139B22514A0879"

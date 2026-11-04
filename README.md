@@ -39,13 +39,14 @@ phone-bridge --wifi                             # or Wi-Fi (see Links below)
 | Link | On the PC | Audio | Camera |
 |------|-----------|-------|--------|
 | USB cable (default) | `phone-bridge` | raw PCM | yes |
-| Wi-Fi | `phone-bridge --wifi` | raw PCM over UDP | yes (TCP) |
+| Wi-Fi | `phone-bridge --wifi` | Opus, 5 ms frames, over UDP | yes (TCP) |
 | Bluetooth tethering | `phone-bridge --pan [phone MAC]` | Opus, 5 ms frames | low resolutions only |
 | Bluetooth direct | `phone-bridge --bt` | Opus, 5 ms frames | no |
 
-USB has the lowest and steadiest delay. Wi-Fi delay depends on the network: it arrives in bursts,
-so it needs a bigger output buffer than USB (try **Stable** if it crackles). Bluetooth adds the
-Opus frame plus the radio, a few tens of ms.
+USB has the lowest and steadiest delay. On Wi-Fi with both ends on 5 GHz it is close (measured:
+0 underruns at the 30 ms buffer). On Wi-Fi and Bluetooth the output buffer adapts: it grows when
+the network leaves a gap and shrinks back once it is calm, never below the buffer setting.
+Bluetooth adds the radio's own delay, a few tens of ms.
 
 Pick the same link in the app (Connection card). If adb reaches the phone (cable, or wireless
 debugging with `adb pair` / `adb connect`), `phone-bridge` sets the app up and starts it.
@@ -55,9 +56,15 @@ Without adb: open the app, pick the link, type the PIN, tap Start.
   With "PC address" left empty, the app finds the PC with a UDP broadcast.
 - **Bluetooth**: pair the phone with the PC first. Direct mode needs `python-dbus` and
   `python-gobject`; tethering needs NetworkManager (`nmcli`) to join the phone's network.
-- **Codec**: Automatic = raw PCM on Wi-Fi (no codec delay), Opus on Bluetooth (raw stereo + mic
-  is ~2.3 Mbit/s, more than Bluetooth carries reliably). Opus runs in restricted low-delay mode
-  with 5 ms frames; lost packets are concealed instead of clicking.
+- **Codec**: Automatic = Opus on every wireless link: restricted low-delay mode, 5 ms frames,
+  ~2.5 ms lookahead. Packets are ~10x smaller than raw PCM (less airtime), lost ones are concealed
+  instead of clicking, and each UDP packet also carries the previous chunk, so a single lost
+  packet is rebuilt exactly. Raw PCM (`--codec pcm`) skips the codec but clicks on loss, and the
+  redundant copy only fits for the mono mic.
+- **Staying alive in the background**: the app runs as a foreground service with a wake lock and
+  asks once to be exempt from battery optimization; `phone-bridge` also grants that over adb.
+  Xiaomi / Oppo / Huawei have their own switch on top: Advanced › "Open the app's settings" ›
+  Battery saver: No restrictions, Autostart on, and lock the app in Recents.
 
 ### Security (Wi-Fi / Bluetooth)
 
@@ -83,7 +90,11 @@ Without adb: open the app, pick the link, type the PIN, tap Start.
    radio between beacons: tens of ms of jitter). To keep it off on NetworkManager:
    `wifi.powersave = 2` in `/etc/NetworkManager/conf.d/`. The app holds a low-latency Wi-Fi lock
    on the phone (fully effective while the screen is on).
-2. 5 GHz, close to the router. Packets are marked DSCP EF (voice queue on WMM routers).
+2. **Phone and PC both on 5 GHz.** This makes the biggest difference. Measured here: phone on
+   2.4 GHz gave 3 % packet loss and 140 ms spikes (the buffer had to grow past 100 ms); both on
+   5 GHz gave 0 % loss, ~4 ms round trip, 0 underruns at the 30 ms buffer. `phone-bridge --wifi`
+   and the app warn when either side is on 2.4 GHz. Packets are marked DSCP EF (voice queue on
+   WMM routers).
 3. PC on Ethernet, phone on Wi-Fi, beats both on Wi-Fi.
 4. If it crackles, raise the output buffer (Latency card).
 
@@ -111,6 +122,10 @@ All text lives in `res/values/strings.xml`; add `res/values-xx/strings.xml` for 
 Builds without Gradle: Android SDK (any recent `platforms;android-NN` + `build-tools`), the NDK,
 cmake, JDK 17+. `build.sh` picks the newest installed ones and, the first time, downloads libopus
 (checksum-pinned) into `.cache/` and builds it for arm64 and armv7.
+
+`debug.keystore` (in the repo, the repo is private) signs the APK. Keep it: an APK signed with
+another key can't update the installed app (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`; the only way
+out is uninstalling, which loses the app's settings).
 
 ### Latency and quality
 
@@ -161,7 +176,7 @@ phone-bridge --cam front      # also start the front camera (or: --cam back)
 phone-bridge -a               # also play the phone's sound on the PC speakers
 phone-bridge -b 40 -m 7       # 40 ms buffer, mic in voice-call mode (echo cancelling)
 phone-bridge --no-mic         # only PC audio -> phone
-phone-bridge --codec opus     # Opus on Wi-Fi too (less data, ~5 ms more)
+phone-bridge --codec pcm      # raw PCM on Wi-Fi (no codec; clicks if packets get lost)
 phone-bridge pin              # the PIN to type in the app (pin new: change it)
 phone-bridge stop             # stop and put the audio back where it was
 phone-bridge ports 23456 23457 23458   # if 12345/12346/12347 are taken

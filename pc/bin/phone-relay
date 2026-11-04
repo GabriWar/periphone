@@ -37,7 +37,8 @@ VERSION = 1
 ROLE_SPK, ROLE_MIC, ROLE_CAM, ROLE_AUDIO = 1, 2, 3, 4
 ROLE_NAMES = {ROLE_SPK: "PC audio -> phone", ROLE_MIC: "phone mic -> PC",
               ROLE_CAM: "phone camera -> PC", ROLE_AUDIO: "phone audio -> PC"}
-F_ENCRYPT, F_OPUS = 1, 2
+F_ENCRYPT, F_OPUS, F_REDUNDANT = 1, 2, 4
+MAX_REDUNDANT = 1400              # payload with the previous chunk: stays under the Wi-Fi MTU
 E_PIN, E_DOWN, E_UNKNOWN, E_BUSY, E_UNSUPPORTED = 1, 2, 3, 4, 5
 HELLO_LEN, CONFIRM_LEN = 1 + 3 + 8 + 256, 1 + 8 + 32
 FRAMES = 240                      # 5 ms at 48 kHz
@@ -257,6 +258,8 @@ class Session:
         channels = 1 if role == ROLE_MIC else 2
         self.frame_bytes = FRAMES * channels * 2
         opus = bool(flags & F_OPUS) and role != ROLE_CAM
+        self.red = bool(flags & F_REDUNDANT) and role != ROLE_CAM
+        self.prev = b""
         self.enc = Encoder(channels, 160000) if opus and role == ROLE_SPK else None
         self.dec = Decoder(channels) if opus and role in (ROLE_MIC, ROLE_AUDIO) else None
         log(f"{label}: {ROLE_NAMES[role]} connected"
@@ -300,14 +303,26 @@ class Session:
             if self.role == ROLE_CAM:
                 self.local.sendall(payload)
                 return
+            before = b""
+            if self.red:                          # curLen | current | previous (see Proto.java)
+                if len(payload) < 2:
+                    return
+                cl = struct.unpack_from(">H", payload)[0]
+                payload, before = payload[2:2 + cl], payload[2 + cl:]
             if gap and gap <= 50:                 # lost packets: keep the timing, fill the hole
-                for _ in range(min(gap, 8)):
+                holes = min(gap, 8)
+                for _ in range(holes - (1 if before else 0)):
                     self.local.sendall(self.dec.decode(None) if self.dec else bytes(self.frame_bytes))
-            pcm = self.dec.decode(payload) if self.dec else payload
-            if len(pcm) == self.frame_bytes:
-                self.local.sendall(pcm)
+                if before:                        # the last lost one came back in this packet
+                    self.write_pcm(before)
+            self.write_pcm(payload)
         except OSError:
             self.relay.drop(self, "the PC side closed")
+
+    def write_pcm(self, data):
+        pcm = self.dec.decode(data) if self.dec else data
+        if len(pcm) == self.frame_bytes:
+            self.local.sendall(pcm)
 
     def _pump(self):
         """PipeWire -> phone, one 5 ms packet at a time."""
@@ -324,8 +339,15 @@ class Session:
             while len(buf) >= fb:
                 chunk = bytes(buf[:fb])
                 del buf[:fb]
+                cur = self.enc.encode(chunk) if self.enc else chunk
+                if self.red:
+                    extra = self.prev if 2 + len(cur) + len(self.prev) <= MAX_REDUNDANT else b""
+                    payload = struct.pack(">H", len(cur)) + cur + extra
+                    self.prev = cur
+                else:
+                    payload = cur
                 try:
-                    self.send_data(self.enc.encode(chunk) if self.enc else chunk)
+                    self.send_data(payload)
                 except OSError:
                     if not self.udp:          # stream link broke; UDP just loses the packet
                         self.alive = False

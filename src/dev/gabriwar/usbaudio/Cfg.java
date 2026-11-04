@@ -47,6 +47,7 @@ final class Cfg {
     static final String K_ENCRYPT = "encrypt";
     static final String K_CODEC = "codec";            // CODEC_*
     static final String K_BT_ADDR = "btAddr";         // paired PC for Bluetooth direct
+    static final String K_BATT_ASKED = "battAsked";   // asked once for the battery exemption
 
     static final int MIN_BUF_MS = 10, MAX_BUF_MS = 200;
     static final int DEFAULT_BUF_MS = 30;
@@ -84,8 +85,10 @@ final class Cfg {
             btAddr = p.getString(K_BT_ADDR, "");
             encrypt = p.getBoolean(K_ENCRYPT, true);
             int codec = p.getInt(K_CODEC, CODEC_AUTO);
-            // Bluetooth can't carry raw PCM reliably (~2.3 Mbit/s for both ways); Wi-Fi can
-            opus = codec == CODEC_OPUS || (codec == CODEC_AUTO && (mode == LINK_PAN || mode == LINK_BT));
+            // wireless: Opus. Bluetooth can't carry raw PCM reliably (~2.3 Mbit/s both ways), and on
+            // Wi-Fi 10x smaller packets mean less airtime, room for a redundant copy (lost packets
+            // rebuilt) and concealment instead of clicks, for ~2.5 ms of codec lookahead
+            opus = codec == CODEC_OPUS || (codec == CODEC_AUTO && mode != LINK_USB);
         }
 
         boolean usb() {
