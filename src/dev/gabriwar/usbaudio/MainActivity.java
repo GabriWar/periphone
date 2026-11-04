@@ -955,6 +955,8 @@ public class MainActivity extends Activity {
         if (host.equals(prefs.getString(Cfg.K_HOST, "")) && pin.equals(prefs.getString(Cfg.K_PIN, ""))) return;
         prefs.edit().putString(Cfg.K_HOST, host).putString(Cfg.K_PIN, pin).apply();
         Stats.pcAddr = null;
+        Stats.pinFails = 0;
+        Stats.pinRetryAt = 0;
         Toast.makeText(this, R.string.link_saved, Toast.LENGTH_SHORT).show();
         applyIfRunning();
     }
@@ -1110,7 +1112,8 @@ public class MainActivity extends Activity {
             clearSco();
             startService(new Intent(this, BridgeService.class).setAction(BridgeService.ACTION_STOP));
         } else {
-            Stats.badPinSig = null;          // the user asked: try again even after a wrong PIN
+            Stats.pinFails = 0;              // the user asked: try again right away
+            Stats.pinRetryAt = 0;
             startBridge();
             if (prefs.getBoolean(Cfg.K_CAP, false)) requestProjection();
         }
@@ -1169,7 +1172,8 @@ public class MainActivity extends Activity {
         if (Cfg.validPort(p = i.getIntExtra("camport", -1))) e.putInt(Cfg.K_CAM_PORT, p);
         e.apply();
         Stats.pcAddr = null;
-        Stats.badPinSig = null;
+        Stats.pinFails = 0;
+        Stats.pinRetryAt = 0;
         reflectPrefs();
         camBody.setVisibility(swCam.isChecked() ? View.VISIBLE : View.GONE);
         startBridge();

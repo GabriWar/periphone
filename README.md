@@ -66,8 +66,10 @@ Without adb: open the app, pick the link, type the PIN, tap Start.
   handshake.
 - **Guess limits**: on the PC, every handshake that doesn't finish with the right PIN costs a
   token (8 to start, 1 back every 10 s): about one guess per 10 s, ~2 months on average for a
-  6-digit PIN, and `phone-relay` logs a warning. On the phone, after a PIN mismatch the app stops
-  retrying until you change the PIN or tap Stop/Start, so a fake PC can't keep guessing either.
+  6-digit PIN, and `phone-relay` logs a warning. On the phone, each PIN mismatch doubles the wait
+  before the next try (3 s up to ~1 min; reset by a success, a new PIN or Stop/Start), so a fake
+  PC answering discovery gets about one guess a minute. A REPLY that doesn't prove the PIN is
+  ignored while the real PC still has time to answer, so a forged one can't break the handshake.
 - **Encryption** (on by default; `--no-encrypt` or the app switch turns it off): AES-128-GCM on
   every packet, a fresh key per stream from the PIN handshake. Hardware AES on both sides, a few
   µs per packet. With encryption off the PIN is still checked, but the audio travels in the clear

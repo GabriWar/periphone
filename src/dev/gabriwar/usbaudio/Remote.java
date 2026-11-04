@@ -75,7 +75,8 @@ final class Remote implements Closeable {
 
     void connect() throws IOException {
         if (link.pin.isEmpty()) throw fail(R.string.err_no_pin);
-        if (link.sig().equals(Stats.badPinSig)) throw fail(R.string.err_wrong_pin_stopped);
+        long wait = Stats.pinRetryAt - now();
+        if (wait > 0) throw fail(R.string.err_wrong_pin_wait, (wait + 999) / 1000);
         Proto.Client hs = new Proto.Client(role, link.flags(), link.pin);
         String where;
         if (link.mode == Cfg.LINK_BT) {
@@ -95,6 +96,7 @@ final class Remote implements Closeable {
         }
         tx = new Proto.Seal(hs.sendKey, link.encrypt);
         rx = new Proto.Seal(hs.recvKey, link.encrypt);
+        Stats.pinFails = 0;
         lastHeard = lastPing = lastPoll = now();
         Stats.linkWhere = where;
     }
@@ -165,17 +167,21 @@ final class Remote implements Closeable {
         s.connect(pc, Cfg.NET_PORT);
         s.setSoTimeout(300);
         byte[] hello = hs.hello(), confirm = null;
+        boolean badProof = false;
         long end = now() + HANDSHAKE_MS;
         while (confirm == null) {
             if (now() > end) {
+                if (badProof) throw wrongPin();
                 if (discovered) Stats.pcAddr = null;   // maybe the PC moved: look again next time
                 throw fail(R.string.err_pc_no_answer, pc.getHostAddress());
             }
             sendRaw(hello, hello.length);
             int n = recvUdp();
             if (n == Proto.REPLY_LEN && buf[0] == 'R' && hs.sameSid(buf, 1)) {
+                // a REPLY that doesn't prove the PIN may be forged by someone on the network:
+                // keep waiting for the real PC, count it as a mismatch only if none shows up
                 confirm = hs.finish(Arrays.copyOf(buf, n));
-                if (confirm == null) throw wrongPin();
+                if (confirm == null) badProof = true;
             } else if (n >= 10 && buf[0] == 'E' && hs.sameSid(buf, 1)) {
                 throw error(buf[9]);
             }
@@ -251,9 +257,14 @@ final class Remote implements Closeable {
         if (stream instanceof Socket) ((Socket) stream).setSoTimeout(0);
     }
 
-    /** PIN mismatch: stop retrying these settings until the user changes them or taps Start. */
+    /**
+     * PIN mismatch: back off 3 s, 6 s... up to 60 s before the next try. A fake PC answering
+     * discovery then gets ~1 PIN guess a minute, and a spoofed error (they aren't authenticated)
+     * only delays us, it can't lock us out. Reset by a success, new settings or Start.
+     */
     private IOException wrongPin() {
-        Stats.badPinSig = link.sig();
+        int fails = Math.min(++Stats.pinFails, 5);
+        Stats.pinRetryAt = now() + Math.min(60_000L, 1_500L << fails);
         if (discovered) Stats.pcAddr = null;   // maybe we found the wrong PC: look again next time
         return fail(R.string.err_wrong_pin);
     }

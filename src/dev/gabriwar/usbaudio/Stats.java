@@ -59,7 +59,7 @@ final class Stats {
     // Wi-Fi / Bluetooth: where the PC was found, and how the last stream got there
     static volatile InetAddress pcAddr;
     static volatile String linkWhere = "";
-    // link settings whose PIN a PC rejected (or a PC failed to prove): no automatic retries with
-    // them, or a fake PC answering discovery could test one PIN guess per retry
-    static volatile String badPinSig;
+    // PIN mismatches in a row and when to try again (back-off, see Remote.wrongPin)
+    static volatile int pinFails;
+    static volatile long pinRetryAt;
 }
