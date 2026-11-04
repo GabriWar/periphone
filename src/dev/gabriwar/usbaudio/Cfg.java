@@ -13,7 +13,7 @@ final class Cfg {
     static final int DEFAULT_MIC_PORT = 12346;   // phone -> PC, S16LE mono
     static final int DEFAULT_CAM_PORT = 12347;   // phone -> PC, framed H.264 (see CameraPipe)
     static final int AUDIO_PORT = 12348;         // phone -> PC, S16LE stereo: the phone's own sound
-    static final int NET_PORT = 12350;           // phone-relay on the PC (Wi-Fi / Bluetooth), UDP + TCP
+    static final int NET_PORT = 12350;           // phonebridge on the PC (Wi-Fi / Bluetooth), UDP + TCP
 
     static final int LINK_USB = 0, LINK_WIFI = 1, LINK_PAN = 2, LINK_BT = 3;
     static final int CODEC_AUTO = 0, CODEC_PCM = 1, CODEC_OPUS = 2;
@@ -43,7 +43,7 @@ final class Cfg {
     static final String K_CAP = "cap";                // phone audio -> PC
     static final String K_LINK = "link";              // LINK_*
     static final String K_HOST = "host";              // PC address for Wi-Fi / tethering, empty = find it
-    static final String K_PIN = "pin";                // shown by phone-bridge on the PC
+    static final String K_PIN = "pin";                // shown by phonebridge on the PC
     static final String K_ENCRYPT = "encrypt";
     static final String K_CODEC = "codec";            // CODEC_*
     static final String K_BT_ADDR = "btAddr";         // paired PC for Bluetooth direct

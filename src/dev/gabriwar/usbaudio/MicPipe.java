@@ -15,7 +15,7 @@ import java.util.Arrays;
 
 /**
  * Phone -> PC. Captures the mic (mono S16LE 48 kHz) and sends it to the PipeWire port (USB tunnel)
- * or to phone-relay (Wi-Fi / Bluetooth, see AudioLink).
+ * or to phonebridge (Wi-Fi / Bluetooth, see AudioLink).
  * Only records while there is a PC on the other end, so the mic indicator isn't lit for nothing.
  */
 final class MicPipe extends Thread {

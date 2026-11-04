@@ -38,9 +38,9 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Phone camera -> PC. Camera2 renders straight into the hardware H.264 encoder's input surface;
- * the encoded stream goes to the PC (pc/bin/phone-cam), which decodes it into a v4l2loopback
+ * the encoded stream goes to the PC (pc/phonebridge (camera.go)), which decodes it into a v4l2loopback
  * webcam. Over the USB tunnel the bytes below go straight to phone-cam; over Wi-Fi each write is
- * one sealed message to phone-relay (TCP, see Remote), which hands the same bytes to phone-cam.
+ * one sealed message to phonebridge (TCP, see Remote), which hands the same bytes to its camera receiver.
  *
  * Wire format, all big endian, a sequence of packets: [type u8][length u32][payload]
  *   CONFIG (1): width u16, height u16, fps u16, rotation u16, flags u8

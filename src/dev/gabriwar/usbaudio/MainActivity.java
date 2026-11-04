@@ -2,6 +2,7 @@ package dev.gabriwar.usbaudio;
 
 import android.Manifest;
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.bluetooth.BluetoothAdapter;
 import android.bluetooth.BluetoothDevice;
 import android.bluetooth.BluetoothManager;
@@ -16,7 +17,9 @@ import android.graphics.Matrix;
 import android.graphics.RectF;
 import android.graphics.SurfaceTexture;
 import android.graphics.Typeface;
+import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.RippleDrawable;
 import android.hardware.display.DisplayManager;
 import android.media.AudioDeviceInfo;
@@ -32,7 +35,11 @@ import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.Editable;
 import android.text.InputType;
+import android.text.TextUtils;
+import android.text.TextWatcher;
+import android.util.TypedValue;
 import android.view.Gravity;
 import android.view.Surface;
 import android.view.TextureView;
@@ -40,6 +47,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
 import android.view.inputmethod.EditorInfo;
+import android.view.inputmethod.InputMethodManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -56,6 +64,7 @@ import android.widget.Toast;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.function.Supplier;
 
 public class MainActivity extends Activity {
     // palette
@@ -92,22 +101,45 @@ public class MainActivity extends Activity {
     private long lastSpkBytes, lastMicBytes, lastCamBytes, lastCamFrames, lastCapBytes, lastT;
     private boolean resumed, reflecting;
 
+    // tabs
+    private static final int TAB_HOME = 0, TAB_LINK = 1, TAB_AUDIO = 2, TAB_CAM = 3, TAB_SETTINGS = 4;
+    private static final int[] TAB_NAMES = {R.string.tab_home, R.string.tab_link, R.string.tab_audio,
+            R.string.tab_camera, R.string.tab_settings};
+    private static final int[] TAB_ICONS = {R.drawable.ic_home, R.drawable.ic_link, R.drawable.ic_speaker,
+            R.drawable.ic_camera, R.drawable.ic_tune};
+    private static final String STATE_TAB = "tab";
+    private int tab = -1;
+    private LinearLayout root;
+    private final ScrollView[] pages = new ScrollView[TAB_NAMES.length];
+    private final ImageView[] navIcons = new ImageView[TAB_NAMES.length];
+    private final TextView[] navLabels = new TextView[TAB_NAMES.length];
+    private LinearLayout navBar;
+    private TextView noticeBar;
+    // status strip (every tab but Home): overall state + Start/Stop
+    private LinearLayout strip;
+    private View stripDot;
+    private TextView stripTitle;
+    private Button stripBtn;
+    private int overallColor;
+
     // hero
     private View heroDot;
     private TextView heroTitle, heroHint;
     private Button btnStart;
+    // live status of each stream, shown in its card and in the summary on Home
+    private Status spkSt, micSt, capSt, camSt, linkSt;
+    private Switch homeSwSpk, homeSwMic, homeSwCap, homeSwCam;
+    private LevelView homeMicLevel;
     // output
     private Switch swSpk;
-    private View spkDot;
-    private TextView spkStatus, spkDetail, spkVolText, spkBtTip;
+    private TextView spkVolText, spkBtTip;
     private Button btnMuteSpk;
     private SeekBar sbSpkVol;
     private Spinner spOut;
     private SpectrogramView svSpk;
     // mic
     private Switch swMic;
-    private View micDot;
-    private TextView micStatus, micDetail, micVolText;
+    private TextView micVolText;
     private Button btnMuteMic;
     private SeekBar sbMicVol;
     private LevelView micLevel;
@@ -115,8 +147,6 @@ public class MainActivity extends Activity {
     private SpectrogramView svMic;
     // camera
     private Switch swCam, swMirror;
-    private View camDot;
-    private TextView camStatus, camDetail;
     private LinearLayout camBody;
     private TextView[] facingSeg;
     private TextureView preview;
@@ -127,24 +157,24 @@ public class MainActivity extends Activity {
     private Spinner spCamSize, spCamFps, spCamQuality, spCamRot;
     // connection
     private TextView[] linkSeg;
-    private TextView linkDesc, linkWhere;
+    private TextView linkDesc, wifiWarn, linkWhere, linkProblem, pinWarn;
     private LinearLayout netBody, hostBox, btBox;
     private EditText etHost, etPin;
+    private Button btnSaveNet;
     private Switch swEncrypt;
     private Spinner spBt, spCodec;
     private final List<String> btAddrs = new ArrayList<>(), btNames = new ArrayList<>();
     // phone sound -> PC
     private Switch swCap;
-    private View capDot;
-    private TextView capStatus, capDetail;
     // latency
     private TextView[] presetSeg;
-    private TextView presetDesc, tvBuf, tvMicBuf;
+    private TextView presetDesc, tvBuf, tvMicBuf, fineToggle;
     private SeekBar sbBuf, sbMicBuf;
     private LinearLayout fineBody;
     // advanced
     private Switch swAwake;
     private EditText etSpkPort, etMicPort, etCamPort;
+    private TextView portsError;
     private LinearLayout advBody;
     private TextView advArrow;
 
@@ -181,6 +211,68 @@ public class MainActivity extends Activity {
         TextView t = text(getString(res), 13, TEXT2, false);
         t.setPadding(0, dp(14), 0, dp(2));
         return t;
+    }
+
+    /** Explanatory text: same size everywhere, a bit of line spacing so it reads on the dark cards. */
+    private TextView hint(CharSequence s, int color) {
+        TextView t = text(s, 13, color, false);
+        t.setLineSpacing(0, 1.15f);
+        return t;
+    }
+
+    /** setText that skips the relayout when nothing changed (the status refreshes 4 times a second). */
+    private static void setIfChanged(TextView t, CharSequence s) {
+        if (!TextUtils.equals(t.getText(), s)) t.setText(s);
+    }
+
+    /** Touch feedback on a rounded area; fill 0 = transparent. */
+    private RippleDrawable pressable(int fill, float radiusPx) {
+        return new RippleDrawable(ColorStateList.valueOf(0x22FFFFFF), fill == 0 ? null : round(fill, radiusPx),
+                round(0xFFFFFFFF, radiusPx));
+    }
+
+    private static TextWatcher onEdit(Runnable r) {
+        return new TextWatcher() {
+            @Override public void beforeTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void onTextChanged(CharSequence s, int a, int b, int c) {}
+            @Override public void afterTextChanged(Editable e) {
+                r.run();
+            }
+        };
+    }
+
+    /** A stream's live status: dot + line + detail, in its own card and in the summary on Home. */
+    private final class Status {
+        final View dot = new View(MainActivity.this), homeDot = new View(MainActivity.this);
+        final TextView line = text("", 15, TEXT, true), detail = text("", 12, TEXT2, false);
+        final TextView homeLine = text("", 14, TEXT, false), homeDetail = text("", 12, TEXT2, false);
+        private int color;
+
+        Status() {
+            homeDetail.setMaxLines(2);
+            homeDetail.setEllipsize(TextUtils.TruncateAt.END);
+        }
+
+        /** problem: the detail is an error message, shown in amber so it stands out. */
+        void set(int c, String s, String d, boolean problem) {
+            if (c != color) {
+                color = c;
+                paintDot(dot, c);
+                paintDot(homeDot, c);
+            }
+            setIfChanged(line, s);
+            setIfChanged(homeLine, s);
+            setIfChanged(detail, d);
+            setIfChanged(homeDetail, d);
+            int dc = problem ? AMBER : TEXT2;
+            if (detail.getCurrentTextColor() != dc) {
+                detail.setTextColor(dc);
+                homeDetail.setTextColor(dc);
+            }
+            int vis = d.isEmpty() ? View.GONE : View.VISIBLE;
+            detail.setVisibility(vis);
+            homeDetail.setVisibility(vis);
+        }
     }
 
     private static LinearLayout.LayoutParams lp(int w, int h) {
@@ -225,17 +317,17 @@ public class MainActivity extends Activity {
         return r;
     }
 
-    /** Status line: colored dot + bold text; detail line below in grey. */
-    private void statusLines(LinearLayout card, View dot, TextView status, TextView detail) {
+    /** Status line: colored dot + bold text; detail line below in grey (amber for errors). */
+    private void statusLines(LinearLayout card, Status st) {
         LinearLayout r = row();
         r.setPadding(0, dp(6), 0, 0);
-        r.addView(dot, lp(dp(10), dp(10)));
+        r.addView(st.dot, lp(dp(10), dp(10)));
         LinearLayout.LayoutParams tp = weight(1);
         tp.leftMargin = dp(10);
-        r.addView(status, tp);
+        r.addView(st.line, tp);
         card.addView(r);
-        detail.setPadding(dp(20), dp(2), 0, 0);
-        card.addView(detail);
+        st.detail.setPadding(dp(20), dp(2), 0, 0);
+        card.addView(st.detail);
     }
 
     private Button pillButton() {
@@ -266,6 +358,7 @@ public class MainActivity extends Activity {
             s.setTag(i);
             s.setOnClickListener(l);
             s.setClickable(true);
+            s.setForeground(pressable(0, dp(10)));
             r.addView(s, new LinearLayout.LayoutParams(0, dp(38), 1f));
             segs[i] = s;
         }
@@ -289,8 +382,15 @@ public class MainActivity extends Activity {
         final Spinner sp = new Spinner(this);
         sp.setAdapter(adapter(items));
         select(sp, Math.max(0, sel));
-        sp.setBackground(round(CARD_HI, dp(10)));
-        sp.setPadding(dp(6), 0, dp(6), 0);
+        // rounded box + a drop-down arrow (a plain background hides the platform's arrow)
+        Drawable arrow = getDrawable(R.drawable.ic_drop).mutate();
+        arrow.setTint(TEXT2);
+        LayerDrawable bg = new LayerDrawable(new Drawable[]{round(CARD_HI, dp(10)), arrow});
+        bg.setLayerGravity(1, Gravity.END | Gravity.CENTER_VERTICAL);
+        bg.setLayerSize(1, dp(24), dp(24));
+        bg.setLayerInsetEnd(1, dp(8));
+        sp.setBackground(bg);
+        sp.setPadding(dp(6), 0, dp(36), 0);
         sp.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> p, View v, int pos, long id) {
                 Object set = sp.getTag();
@@ -363,37 +463,70 @@ public class MainActivity extends Activity {
         am = getSystemService(AudioManager.class);
         Stats.camFront = prefs.getBoolean(Cfg.K_CAM_FRONT, false);
 
-        LinearLayout root = new LinearLayout(this);
+        // status strip on top, one scrolling page per tab, navigation bar at the bottom
+        root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
-        root.setPadding(dp(16), dp(20), dp(16), dp(24));
+        root.setBackgroundColor(BG);
+        // takes the focus off a text field when switching tabs (that saves it), without a highlight
+        root.setFocusableInTouchMode(true);
+        root.setDefaultFocusHighlightEnabled(false);
+        buildStrip(root);
+        FrameLayout content = new FrameLayout(this);
+        root.addView(content, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        buildNav(root);
 
-        buildHeader(root);
-        buildHero(root);
-        buildConnection(root);
-        buildOutput(root);
-        buildMic(root);
+        spkSt = new Status();
+        micSt = new Status();
+        capSt = new Status();
+        camSt = new Status();
+        linkSt = new Status();
+
+        LinearLayout home = page(content, TAB_HOME);
+        home.setPadding(dp(16), dp(20), dp(16), dp(24));
+        buildHeader(home);
+        buildHero(home);
+        buildSummary(home);
+        buildFooter(home);
+
+        buildConnection(page(content, TAB_LINK));
+
+        LinearLayout audio = page(content, TAB_AUDIO);
+        buildOutput(audio);
+        buildMic(audio);
         applyVolumes(false);
-        buildCapture(root);
-        buildCamera(root);
-        buildLatency(root);
-        buildAdvanced(root);
-        buildFooter(root);
+        buildCapture(audio);
 
-        ScrollView sv = new ScrollView(this);
-        sv.setBackgroundColor(BG);
-        sv.setFillViewport(true);
-        sv.addView(root);
+        buildCamera(page(content, TAB_CAM));
+
+        LinearLayout settings = page(content, TAB_SETTINGS);
+        buildLatency(settings);
+        buildAdvanced(settings);
+
+        // short confirmation that a setting was saved / applied, above the navigation bar
+        noticeBar = text("", 14, TEXT, false);
+        noticeBar.setBackground(round(CARD_HI, dp(12)));
+        noticeBar.setPadding(dp(16), dp(10), dp(16), dp(10));
+        noticeBar.setElevation(dp(6));
+        noticeBar.setVisibility(View.GONE);
+        FrameLayout.LayoutParams np = new FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT,
+                ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL);
+        np.setMargins(dp(24), 0, dp(24), dp(12));
+        content.addView(noticeBar, np);
+
         // status / navigation bar insets (edge-to-edge on new Android versions)
-        final int pl = root.getPaddingLeft(), pt = root.getPaddingTop(), pr = root.getPaddingRight(), pb = root.getPaddingBottom();
-        sv.setOnApplyWindowInsetsListener((v, insets) -> {
-            root.setPadding(pl + insets.getSystemWindowInsetLeft(), pt + insets.getSystemWindowInsetTop(),
-                    pr + insets.getSystemWindowInsetRight(), pb + insets.getSystemWindowInsetBottom());
+        final int nl = navBar.getPaddingLeft(), nt = navBar.getPaddingTop(), nr = navBar.getPaddingRight(),
+                nb = navBar.getPaddingBottom();
+        root.setOnApplyWindowInsetsListener((v, insets) -> {
+            root.setPadding(insets.getSystemWindowInsetLeft(), insets.getSystemWindowInsetTop(),
+                    insets.getSystemWindowInsetRight(), 0);
+            navBar.setPadding(nl, nt, nr, nb + insets.getSystemWindowInsetBottom());
             return insets;
         });
-        setContentView(sv);
+        setContentView(root);
         applyAwake();
+        showTab(b == null ? TAB_HOME : b.getInt(STATE_TAB, TAB_HOME), false);
 
-        // not when recreated or reopened from Recents: that would replay phone-bridge's autostart
+        // not when recreated or reopened from Recents: that would replay phonebridge's autostart
         if (b == null && (getIntent().getFlags() & Intent.FLAG_ACTIVITY_LAUNCHED_FROM_HISTORY) == 0) {
             handleIntent(getIntent());
         }
@@ -421,6 +554,143 @@ public class MainActivity extends Activity {
         }
         if (!perms.isEmpty()) requestPermissions(perms.toArray(new String[0]), REQ_MIC);
     }
+
+    // ------------------------------------------------------------------ tabs
+
+    /** A tab's scrolling page; returns the column to put its cards in. */
+    private LinearLayout page(FrameLayout content, int t) {
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.setPadding(dp(16), dp(8), dp(16), dp(24));
+        ScrollView sv = new ScrollView(this);
+        sv.setFillViewport(true);
+        sv.addView(col);
+        sv.setVisibility(View.GONE);
+        content.addView(sv, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        pages[t] = sv;
+        return col;
+    }
+
+    /** Overall state + Start/Stop, on every tab but Home (Home has the big version). Tap: go Home. */
+    private void buildStrip(LinearLayout root) {
+        strip = row();
+        strip.setBackground(pressable(CARD, dp(16)));
+        strip.setPadding(dp(14), dp(6), dp(6), dp(6));
+        strip.setOnClickListener(v -> showTab(TAB_HOME, true));
+        stripDot = new View(this);
+        strip.addView(stripDot, lp(dp(10), dp(10)));
+        stripTitle = text("", 15, TEXT, true);
+        stripTitle.setSingleLine(true);
+        stripTitle.setEllipsize(TextUtils.TruncateAt.END);
+        LinearLayout.LayoutParams tp = weight(1);
+        tp.leftMargin = dp(10);
+        strip.addView(stripTitle, tp);
+        stripBtn = pillButton();
+        stripBtn.setTypeface(Typeface.create("sans-serif-medium", Typeface.NORMAL));
+        stripBtn.setOnClickListener(v -> onToggle());
+        strip.addView(stripBtn, lp(ViewGroup.LayoutParams.WRAP_CONTENT, dp(40)));
+        LinearLayout.LayoutParams p = lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        p.setMargins(dp(16), dp(12), dp(16), dp(4));
+        root.addView(strip, p);
+    }
+
+    private void buildNav(LinearLayout root) {
+        navBar = row();
+        navBar.setBackgroundColor(CARD);
+        navBar.setPadding(dp(4), dp(8), dp(4), dp(8));
+        for (int i = 0; i < TAB_NAMES.length; i++) {
+            final int t = i;
+            LinearLayout item = new LinearLayout(this);
+            item.setOrientation(LinearLayout.VERTICAL);
+            item.setGravity(Gravity.CENTER_HORIZONTAL);
+            item.setBackground(pressable(0, dp(16)));
+            item.setPadding(0, dp(2), 0, dp(2));
+            item.setOnClickListener(v -> showTab(t, true));
+            ImageView iv = new ImageView(this);
+            iv.setImageResource(TAB_ICONS[i]);
+            iv.setPadding(dp(17), dp(4), dp(17), dp(4));
+            item.addView(iv, lp(dp(56), dp(30)));
+            TextView label = text(getString(TAB_NAMES[i]), 12, TEXT2, false);
+            label.setSingleLine(true);
+            label.setGravity(Gravity.CENTER_HORIZONTAL);
+            label.setPadding(dp(2), dp(3), dp(2), 0);
+            // "Connection" has to fit five across on a narrow phone
+            label.setAutoSizeTextTypeUniformWithConfiguration(9, 12, 1, TypedValue.COMPLEX_UNIT_SP);
+            item.addView(label, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(20)));
+            navIcons[i] = iv;
+            navLabels[i] = label;
+            navBar.addView(item, weight(1));
+        }
+        root.addView(navBar, lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+    }
+
+    private void showTab(int t, boolean animate) {
+        if (t == tab) {
+            pages[t].smoothScrollTo(0, 0);              // tapping the current tab again: back to its top
+            return;
+        }
+        // leaving a text field saves it (focus listener) and closes the keyboard
+        View focus = getCurrentFocus();
+        if (focus instanceof EditText) {
+            InputMethodManager imm = getSystemService(InputMethodManager.class);
+            if (imm != null) imm.hideSoftInputFromWindow(focus.getWindowToken(), 0);
+            root.requestFocus();
+        }
+        tab = t;
+        for (int i = 0; i < pages.length; i++) {
+            boolean on = i == t;
+            pages[i].setVisibility(on ? View.VISIBLE : View.GONE);
+            navIcons[i].setColorFilter(on ? ACCENT : TEXT2);
+            navIcons[i].setBackground(on ? round(0x335B8CFF, dp(15)) : null);
+            navLabels[i].setTextColor(on ? TEXT : TEXT2);
+            navLabels[i].setTypeface(on ? Typeface.create("sans-serif-medium", Typeface.NORMAL) : Typeface.DEFAULT);
+        }
+        strip.setVisibility(t == TAB_HOME ? View.GONE : View.VISIBLE);
+        if (animate) {
+            pages[t].setAlpha(0f);
+            pages[t].animate().alpha(1f).setDuration(120).start();
+        }
+        if (t == TAB_LINK) showLink();                 // fresh paired-device list and Wi-Fi band
+        updatePreviewTarget();                          // the camera draws into the preview only on its tab
+        ui.removeCallbacks(specTick);                   // spectrograms / meters only run on their tab
+        if (resumed) ui.post(specTick);
+    }
+
+    @Override
+    protected void onSaveInstanceState(Bundle out) {
+        super.onSaveInstanceState(out);
+        out.putInt(STATE_TAB, tab);
+    }
+
+    /** Back from another tab goes Home first. */
+    @Override
+    @SuppressWarnings("deprecation")   // onBackPressed: the app doesn't opt in to predictive back
+    public void onBackPressed() {
+        if (tab != TAB_HOME) showTab(TAB_HOME, true);
+        else super.onBackPressed();
+    }
+
+    /** Brief confirmation above the navigation bar. */
+    private void notice(CharSequence s) {
+        noticeBar.animate().cancel();
+        noticeBar.setText(s);
+        noticeBar.setAlpha(1f);
+        noticeBar.setVisibility(View.VISIBLE);
+        ui.removeCallbacks(hideNotice);
+        ui.postDelayed(hideNotice, 2200);
+    }
+
+    private final Runnable hideNotice = () ->
+            noticeBar.animate().alpha(0f).setDuration(200).withEndAction(() -> noticeBar.setVisibility(View.GONE)).start();
+
+    /** A setting changed by the user: apply it, and say whether it's live or waits for Start. */
+    private void settingChanged() {
+        applyIfRunning();
+        if (!reflecting) notice(getString(Stats.running ? R.string.applied_live : R.string.applied_next));
+    }
+
+    // ------------------------------------------------------------------ cards
 
     private void buildHeader(LinearLayout root) {
         TextView t = text(getString(R.string.app_name), 26, TEXT, true);
@@ -451,13 +721,97 @@ public class MainActivity extends Activity {
         c.addView(btnStart, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(54)));
     }
 
+    /** Every stream at a glance, with a quick on/off switch; tap a row to open its tab. */
+    private void buildSummary(LinearLayout root) {
+        LinearLayout c = card(root);
+        c.setPadding(dp(8), dp(6), dp(8), dp(6));
+        summaryRow(c, R.drawable.ic_link, R.string.link_title, linkSt, null, TAB_LINK);
+        homeSwSpk = quickSwitch(R.string.out_title, Cfg.K_SPK, true, () -> swSpk);
+        summaryRow(c, R.drawable.ic_speaker, R.string.out_title, spkSt, homeSwSpk, TAB_AUDIO);
+        homeSwMic = quickSwitch(R.string.mic_title, Cfg.K_MIC, true, () -> swMic);
+        LinearLayout mic = summaryRow(c, R.drawable.ic_mic, R.string.mic_title, micSt, homeSwMic, TAB_AUDIO);
+        homeMicLevel = new LevelView(this);
+        LinearLayout.LayoutParams mp = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(4));
+        mp.setMargins(dp(16), dp(6), 0, dp(2));
+        mic.addView(homeMicLevel, mp);
+        homeSwCap = quickSwitch(R.string.cap_title, Cfg.K_CAP, false, () -> swCap);
+        summaryRow(c, R.drawable.ic_phone_audio, R.string.cap_title, capSt, homeSwCap, TAB_AUDIO);
+        homeSwCam = quickSwitch(R.string.cam_title, Cfg.K_CAM, false, () -> swCam);
+        summaryRow(c, R.drawable.ic_camera, R.string.cam_title, camSt, homeSwCam, TAB_CAM);
+    }
+
+    /** Home copy of a stream's switch: flips the real one (which does the permission + apply work). */
+    private Switch quickSwitch(int title, String key, boolean def, Supplier<Switch> target) {
+        Switch s = new Switch(this);
+        s.setChecked(prefs.getBoolean(key, def));
+        s.setContentDescription(getString(title));
+        s.setOnCheckedChangeListener((v, on) -> target.get().setChecked(on));
+        return s;
+    }
+
+    /** Returns the text column so the caller can add to it. */
+    private LinearLayout summaryRow(LinearLayout c, int icon, int title, Status st, Switch sw, int target) {
+        if (c.getChildCount() > 0) {
+            View div = new View(this);
+            div.setBackgroundColor(STROKE);
+            LinearLayout.LayoutParams dp1 = lp(ViewGroup.LayoutParams.MATCH_PARENT, 1);
+            dp1.setMargins(dp(42), 0, dp(8), 0);
+            c.addView(div, dp1);
+        }
+        LinearLayout r = row();
+        r.setBackground(pressable(0, dp(12)));
+        r.setPadding(dp(8), dp(10), dp(8), dp(10));
+        r.setOnClickListener(v -> showTab(target, true));
+        ImageView iv = new ImageView(this);
+        iv.setImageResource(icon);
+        iv.setColorFilter(ACCENT);
+        r.addView(iv, lp(dp(22), dp(22)));
+
+        LinearLayout col = new LinearLayout(this);
+        col.setOrientation(LinearLayout.VERTICAL);
+        col.addView(text(getString(title), 15, TEXT, true));
+        LinearLayout sr = row();
+        sr.setPadding(0, dp(3), 0, 0);
+        sr.addView(st.homeDot, lp(dp(8), dp(8)));
+        LinearLayout.LayoutParams tp = weight(1);
+        tp.leftMargin = dp(8);
+        sr.addView(st.homeLine, tp);
+        col.addView(sr);
+        st.homeDetail.setPadding(dp(16), dp(1), 0, 0);
+        col.addView(st.homeDetail);
+        LinearLayout.LayoutParams cp = weight(1);
+        cp.setMargins(dp(12), 0, dp(8), 0);
+        r.addView(col, cp);
+
+        if (sw != null) {
+            r.addView(sw);
+        } else {
+            ImageView more = new ImageView(this);
+            more.setImageResource(R.drawable.ic_chevron);
+            more.setColorFilter(TEXT2);
+            r.addView(more, lp(dp(24), dp(24)));
+        }
+        c.addView(r, lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
+        return col;
+    }
+
     private void buildConnection(LinearLayout root) {
         LinearLayout c = card(root);
         cardHeader(c, R.drawable.ic_link, R.string.link_title, null);
         linkSeg = segmented(c, LINK_NAMES, v -> setLink((Integer) v.getTag()));
-        linkDesc = text("", 13, TEXT2, false);
+        linkDesc = hint("", TEXT2);
         linkDesc.setPadding(0, dp(10), 0, 0);
         c.addView(linkDesc);
+        wifiWarn = hint(getString(R.string.wifi_24_warning), AMBER);
+        wifiWarn.setPadding(0, dp(8), 0, 0);
+        c.addView(wifiWarn);
+        // live: where the streams went, or what's stopping them (right under the mode, not at the bottom)
+        linkWhere = text("", 13, GREEN, false);
+        linkWhere.setPadding(0, dp(8), 0, 0);
+        c.addView(linkWhere);
+        linkProblem = hint("", AMBER);
+        linkProblem.setPadding(0, dp(8), 0, 0);
+        c.addView(linkProblem);
 
         netBody = new LinearLayout(this);
         netBody.setOrientation(LinearLayout.VERTICAL);
@@ -469,7 +823,7 @@ public class MainActivity extends Activity {
         hostBox.addView(fieldLabel(R.string.pc_address));
         etHost = textField(prefs.getString(Cfg.K_HOST, ""), R.string.pc_address_hint,
                 InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
-        hostBox.addView(etHost);
+        hostBox.addView(etHost, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
         btBox = new LinearLayout(this);
         btBox.setOrientation(LinearLayout.VERTICAL);
@@ -477,12 +831,15 @@ public class MainActivity extends Activity {
         spBt = spinner(btBox, R.string.bt_pc, btNames, 0, pos -> {
             if (pos >= btAddrs.size()) return;
             prefs.edit().putString(Cfg.K_BT_ADDR, btAddrs.get(pos)).apply();
-            applyIfRunning();
+            settingChanged();
         });
 
         netBody.addView(fieldLabel(R.string.pin));
         etPin = textField(prefs.getString(Cfg.K_PIN, ""), R.string.pin_hint, InputType.TYPE_CLASS_NUMBER);
-        netBody.addView(etPin);
+        netBody.addView(etPin, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
+        pinWarn = hint(getString(R.string.err_no_pin), AMBER);
+        pinWarn.setPadding(0, dp(6), 0, 0);
+        netBody.addView(pinWarn);
 
         swEncrypt = new Switch(this);
         swEncrypt.setText(R.string.encrypt);
@@ -491,7 +848,7 @@ public class MainActivity extends Activity {
         swEncrypt.setChecked(prefs.getBoolean(Cfg.K_ENCRYPT, true));
         swEncrypt.setOnCheckedChangeListener((v, on) -> {
             prefs.edit().putBoolean(Cfg.K_ENCRYPT, on).apply();
-            applyIfRunning();
+            settingChanged();
         });
         LinearLayout.LayoutParams ep = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
         ep.topMargin = dp(6);
@@ -501,21 +858,21 @@ public class MainActivity extends Activity {
                 prefs.getInt(Cfg.K_CODEC, Cfg.CODEC_AUTO), pos -> {
                     if (prefs.getInt(Cfg.K_CODEC, Cfg.CODEC_AUTO) == pos) return;
                     prefs.edit().putInt(Cfg.K_CODEC, pos).apply();
-                    applyIfRunning();
+                    settingChanged();
                 });
 
-        Button save = pillButton();
-        save.setText(R.string.save_link);
-        stylePill(save, CARD_HI);
-        save.setOnClickListener(v -> saveNet());
+        // lit up while the address / PIN differ from what's saved
+        btnSaveNet = pillButton();
+        btnSaveNet.setOnClickListener(v -> saveNet());
         LinearLayout.LayoutParams sp = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(44));
-        sp.topMargin = dp(12);
-        netBody.addView(save, sp);
+        sp.topMargin = dp(14);
+        netBody.addView(btnSaveNet, sp);
+        TextView auto = hint(getString(R.string.net_autosave_hint), TEXT2);
+        auto.setPadding(0, dp(6), 0, 0);
+        netBody.addView(auto);
 
-        linkWhere = text("", 12, GREEN, false);
-        linkWhere.setPadding(0, dp(8), 0, 0);
-        c.addView(linkWhere);
         showLink();
+        onNetEdited();
     }
 
     private EditText textField(String value, int hint, int type) {
@@ -525,11 +882,17 @@ public class MainActivity extends Activity {
         e.setHint(hint);
         e.setText(value);
         e.setTextColor(TEXT);
-        e.setHintTextColor(GRAY);
+        e.setHintTextColor(TEXT2);
         e.setSingleLine(true);
+        e.setBackground(round(CARD_HI, dp(10)));
+        e.setPadding(dp(12), 0, dp(12), 0);
         e.setOnEditorActionListener((v, action, ev) -> {
             saveNet();
             return false;
+        });
+        e.addTextChangedListener(onEdit(this::onNetEdited));
+        e.setOnFocusChangeListener((v, has) -> {
+            if (!has) saveNet();                        // leaving the field saves it
         });
         return e;
     }
@@ -539,6 +902,7 @@ public class MainActivity extends Activity {
         swCap = new Switch(this);
         swCap.setChecked(prefs.getBoolean(Cfg.K_CAP, false));
         swCap.setOnCheckedChangeListener((v, on) -> {
+            homeSwCap.setChecked(on);
             prefs.edit().putBoolean(Cfg.K_CAP, on).apply();
             if (on && !reflecting) {
                 if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
@@ -546,14 +910,11 @@ public class MainActivity extends Activity {
                 }
                 if (Stats.running) requestProjection();
             }
-            applyIfRunning();
+            settingChanged();
         });
         cardHeader(c, R.drawable.ic_phone_audio, R.string.cap_title, swCap);
-        capDot = new View(this);
-        capStatus = text("", 15, TEXT, true);
-        capDetail = text("", 12, TEXT2, false);
-        statusLines(c, capDot, capStatus, capDetail);
-        TextView hint = text(getString(R.string.cap_hint), 12, TEXT2, false);
+        statusLines(c, capSt);
+        TextView hint = hint(getString(R.string.cap_hint), TEXT2);
         hint.setPadding(0, dp(8), 0, 0);
         c.addView(hint);
     }
@@ -563,15 +924,13 @@ public class MainActivity extends Activity {
         swSpk = new Switch(this);
         swSpk.setChecked(prefs.getBoolean(Cfg.K_SPK, true));
         swSpk.setOnCheckedChangeListener((v, on) -> {
+            homeSwSpk.setChecked(on);
             prefs.edit().putBoolean(Cfg.K_SPK, on).apply();
-            applyIfRunning();
+            settingChanged();
         });
         cardHeader(c, R.drawable.ic_speaker, R.string.out_title, swSpk);
 
-        spkDot = new View(this);
-        spkStatus = text("", 15, TEXT, true);
-        spkDetail = text("", 12, TEXT2, false);
-        statusLines(c, spkDot, spkStatus, spkDetail);
+        statusLines(c, spkSt);
 
         btnMuteSpk = pillButton();
         btnMuteSpk.setOnClickListener(v -> Stats.muteSpk = !Stats.muteSpk);
@@ -584,7 +943,7 @@ public class MainActivity extends Activity {
         volumeRow(c, btnMuteSpk, sbSpkVol, spkVolText);
 
         spOut = spinner(c, R.string.play_on, outNames, 0, pos -> onDevicePicked(false, pos));
-        spkBtTip = text(getString(R.string.bt_tip), 12, AMBER, false);
+        spkBtTip = hint(getString(R.string.bt_tip), AMBER);
         spkBtTip.setPadding(0, dp(8), 0, 0);
         c.addView(spkBtTip);
 
@@ -597,19 +956,17 @@ public class MainActivity extends Activity {
         swMic = new Switch(this);
         swMic.setChecked(prefs.getBoolean(Cfg.K_MIC, true));
         swMic.setOnCheckedChangeListener((v, on) -> {
+            homeSwMic.setChecked(on);
             prefs.edit().putBoolean(Cfg.K_MIC, on).apply();
             if (on && !reflecting
                     && checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
                 requestPermissions(new String[]{Manifest.permission.RECORD_AUDIO}, REQ_MIC);
             }
-            applyIfRunning();
+            settingChanged();
         });
         cardHeader(c, R.drawable.ic_mic, R.string.mic_title, swMic);
 
-        micDot = new View(this);
-        micStatus = text("", 15, TEXT, true);
-        micDetail = text("", 12, TEXT2, false);
-        statusLines(c, micDot, micStatus, micDetail);
+        statusLines(c, micSt);
 
         micLevel = new LevelView(this);
         LinearLayout.LayoutParams mp = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(6));
@@ -637,7 +994,7 @@ public class MainActivity extends Activity {
                 indexOf(SRC_IDS, prefs.getInt(Cfg.K_SRC, Cfg.DEFAULT_SRC), 0), pos -> {
                     if (prefs.getInt(Cfg.K_SRC, Cfg.DEFAULT_SRC) == SRC_IDS[pos]) return;
                     prefs.edit().putInt(Cfg.K_SRC, SRC_IDS[pos]).apply();
-                    applyIfRunning();
+                    settingChanged();
                 });
 
         svMic = new SpectrogramView(this, Stats.micTap);
@@ -650,6 +1007,7 @@ public class MainActivity extends Activity {
         swCam = new Switch(this);
         swCam.setChecked(prefs.getBoolean(Cfg.K_CAM, false));
         swCam.setOnCheckedChangeListener((v, on) -> {
+            homeSwCam.setChecked(on);
             prefs.edit().putBoolean(Cfg.K_CAM, on).apply();
             camBody.setVisibility(on ? View.VISIBLE : View.GONE);
             if (on && !reflecting
@@ -657,14 +1015,11 @@ public class MainActivity extends Activity {
                 requestPermissions(new String[]{Manifest.permission.CAMERA}, REQ_CAM);
             }
             updatePreviewTarget();
-            applyIfRunning();
+            settingChanged();
         });
         cardHeader(c, R.drawable.ic_camera, R.string.cam_title, swCam);
 
-        camDot = new View(this);
-        camStatus = text("", 15, TEXT, true);
-        camDetail = text("", 12, TEXT2, false);
-        statusLines(c, camDot, camStatus, camDetail);
+        statusLines(c, camSt);
 
         camBody = new LinearLayout(this);
         camBody.setOrientation(LinearLayout.VERTICAL);
@@ -702,7 +1057,7 @@ public class MainActivity extends Activity {
                     if (CAM_SIZES[pos].equals(prefs.getString(Cfg.K_CAM_SIZE, Cfg.DEFAULT_CAM_SIZE))) return;
                     prefs.edit().putString(Cfg.K_CAM_SIZE, CAM_SIZES[pos]).apply();
                     sizePreview();
-                    applyIfRunning();
+                    settingChanged();
                 });
         List<String> fps = new ArrayList<>();
         for (int f : CAM_FPS) fps.add(getString(R.string.fps_n, f));
@@ -710,13 +1065,13 @@ public class MainActivity extends Activity {
                 indexOf(CAM_FPS, prefs.getInt(Cfg.K_CAM_FPS, Cfg.DEFAULT_CAM_FPS), 2), pos -> {
                     if (prefs.getInt(Cfg.K_CAM_FPS, Cfg.DEFAULT_CAM_FPS) == CAM_FPS[pos]) return;
                     prefs.edit().putInt(Cfg.K_CAM_FPS, CAM_FPS[pos]).apply();
-                    applyIfRunning();
+                    settingChanged();
                 });
         spCamQuality = spinner(camBody, R.string.cam_quality, strings(CAM_QUALITY),
                 prefs.getInt(Cfg.K_CAM_QUALITY, Cfg.DEFAULT_CAM_QUALITY), pos -> {
                     if (prefs.getInt(Cfg.K_CAM_QUALITY, Cfg.DEFAULT_CAM_QUALITY) == pos) return;
                     prefs.edit().putInt(Cfg.K_CAM_QUALITY, pos).apply();
-                    applyIfRunning();
+                    settingChanged();
                 });
         List<String> rots = new ArrayList<>();
         rots.add(getString(R.string.rot_auto));
@@ -725,7 +1080,7 @@ public class MainActivity extends Activity {
                 indexOf(CAM_ROTS, prefs.getInt(Cfg.K_CAM_ROT, -1), 0), pos -> {
                     if (prefs.getInt(Cfg.K_CAM_ROT, -1) == CAM_ROTS[pos]) return;
                     prefs.edit().putInt(Cfg.K_CAM_ROT, CAM_ROTS[pos]).apply();
-                    applyIfRunning();
+                    settingChanged();
                 });
 
         swMirror = new Switch(this);
@@ -735,13 +1090,13 @@ public class MainActivity extends Activity {
         swMirror.setChecked(prefs.getBoolean(Cfg.K_CAM_MIRROR, false));
         swMirror.setOnCheckedChangeListener((v, on) -> {
             prefs.edit().putBoolean(Cfg.K_CAM_MIRROR, on).apply();
-            applyIfRunning();
+            settingChanged();
         });
         LinearLayout.LayoutParams mp = lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48));
         mp.topMargin = dp(6);
         camBody.addView(swMirror, mp);
 
-        TextView hint = text(getString(R.string.cam_hint), 12, TEXT2, false);
+        TextView hint = hint(getString(R.string.cam_hint), TEXT2);
         hint.setPadding(0, dp(4), 0, 0);
         camBody.addView(hint);
 
@@ -758,22 +1113,20 @@ public class MainActivity extends Activity {
             sbMicBuf.setProgress(Cfg.PRESETS[i][1] - Cfg.MIN_BUF_MS);
             saveBuffers();
         });
-        presetDesc = text("", 13, TEXT2, false);
+        presetDesc = hint("", TEXT2);
         presetDesc.setPadding(0, dp(10), 0, 0);
         c.addView(presetDesc);
 
-        final TextView fine = text(getString(R.string.fine_tune) + "  ▸", 14, ACCENT, true);
-        fine.setPadding(0, dp(14), 0, dp(4));
-        c.addView(fine);
+        fineToggle = text("", 14, ACCENT, true);
+        fineToggle.setPadding(0, dp(10), 0, dp(10));
+        fineToggle.setBackground(pressable(0, dp(8)));
+        LinearLayout.LayoutParams fp = lp(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        fp.topMargin = dp(4);
+        c.addView(fineToggle, fp);
         fineBody = new LinearLayout(this);
         fineBody.setOrientation(LinearLayout.VERTICAL);
-        fineBody.setVisibility(View.GONE);
         c.addView(fineBody);
-        fine.setOnClickListener(v -> {
-            boolean show = fineBody.getVisibility() != View.VISIBLE;
-            fineBody.setVisibility(show ? View.VISIBLE : View.GONE);
-            fine.setText(getString(R.string.fine_tune) + (show ? "  ▾" : "  ▸"));
-        });
+        fineToggle.setOnClickListener(v -> setFine(fineBody.getVisibility() != View.VISIBLE));
 
         Slide bufListener = new Slide() {
             @Override public void onProgressChanged(SeekBar sb, int p, boolean user) {
@@ -794,7 +1147,12 @@ public class MainActivity extends Activity {
         sbMicBuf = slider(Cfg.MAX_BUF_MS - Cfg.MIN_BUF_MS,
                 prefs.getInt(Cfg.K_MIC_BUF, Cfg.DEFAULT_MIC_BUF_MS) - Cfg.MIN_BUF_MS, bufListener);
         fineBody.addView(sbMicBuf);
-        showBuf();
+        setFine(showBuf() < 0);                         // custom values: show the sliders right away
+    }
+
+    private void setFine(boolean show) {
+        fineBody.setVisibility(show ? View.VISIBLE : View.GONE);
+        fineToggle.setText(getString(R.string.fine_tune) + (show ? "  ▾" : "  ▸"));
     }
 
     private void buildAdvanced(LinearLayout root) {
@@ -802,6 +1160,7 @@ public class MainActivity extends Activity {
         LinearLayout h = cardHeader(c, R.drawable.ic_tune, R.string.advanced, null);
         advArrow = text("▸", 16, TEXT2, false);
         h.addView(advArrow);
+        h.setBackground(pressable(0, dp(10)));
         h.setOnClickListener(v -> setAdvanced(advBody.getVisibility() != View.VISIBLE));
 
         advBody = new LinearLayout(this);
@@ -819,7 +1178,7 @@ public class MainActivity extends Activity {
         });
         advBody.addView(swAwake, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(48)));
 
-        TextView bg = text(getString(R.string.bg_hint), 12, TEXT2, false);
+        TextView bg = hint(getString(R.string.bg_hint), TEXT2);
         bg.setPadding(0, dp(6), 0, dp(6));
         advBody.addView(bg);
         Button bgBtn = pillButton();
@@ -842,15 +1201,19 @@ public class MainActivity extends Activity {
         for (EditText e : new EditText[]{etSpkPort, etMicPort, etCamPort}) {
             LinearLayout col = new LinearLayout(this);
             col.setOrientation(LinearLayout.VERTICAL);
-            col.addView(text(e.getHint(), 11, TEXT2, false));
-            col.addView(e);
+            col.addView(text(e.getHint(), 12, TEXT2, false));
+            col.addView(e, lp(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
             LinearLayout.LayoutParams p = weight(1);
             p.rightMargin = dp(8);
             ports.addView(col, p);
         }
         advBody.addView(ports);
-        TextView portHint = text(getString(R.string.ports_hint), 12, TEXT2, false);
-        portHint.setPadding(0, dp(4), 0, 0);
+        portsError = hint(getString(R.string.ports_invalid), RED);   // live, while typing
+        portsError.setPadding(0, dp(6), 0, 0);
+        portsError.setVisibility(View.GONE);
+        advBody.addView(portsError);
+        TextView portHint = hint(getString(R.string.ports_hint), TEXT2);
+        portHint.setPadding(0, dp(6), 0, 0);
         advBody.addView(portHint);
 
         LinearLayout btns = row();
@@ -865,7 +1228,11 @@ public class MainActivity extends Activity {
         Button reset = pillButton();
         reset.setText(R.string.reset_defaults);
         stylePill(reset, CARD_HI);
-        reset.setOnClickListener(v -> resetDefaults());
+        reset.setOnClickListener(v -> new AlertDialog.Builder(this)
+                .setMessage(R.string.reset_confirm)
+                .setPositiveButton(R.string.reset_defaults, (d, w) -> resetDefaults())
+                .setNegativeButton(android.R.string.cancel, null)
+                .show());
         btns.addView(reset, new LinearLayout.LayoutParams(0, dp(44), 1f));
         advBody.addView(btns);
 
@@ -910,29 +1277,37 @@ public class MainActivity extends Activity {
         e.setHint(hint);
         e.setText(String.valueOf(value));
         e.setTextColor(TEXT);
-        e.setHintTextColor(GRAY);
+        e.setHintTextColor(TEXT2);
         e.setSingleLine(true);
+        e.setBackground(round(CARD_HI, dp(10)));
+        e.setPadding(dp(12), 0, dp(12), 0);
+        e.addTextChangedListener(onEdit(this::onPortsEdited));
+        e.setOnEditorActionListener((v, action, ev) -> {
+            savePorts();                                // Done on the keyboard = Save ports
+            return false;
+        });
         return e;
     }
 
     // ------------------------------------------------------------------ actions
 
     private void setLink(int mode) {
+        boolean changed = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB) != mode;
         prefs.edit().putInt(Cfg.K_LINK, mode).apply();
         showLink();
         if (mode == Cfg.LINK_BT && Build.VERSION.SDK_INT >= 31
                 && checkSelfPermission(Manifest.permission.BLUETOOTH_CONNECT) != PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.BLUETOOTH_CONNECT}, REQ_BT);
         }
-        applyIfRunning();
+        if (changed) settingChanged();
+        else applyIfRunning();
     }
 
     private void showLink() {
         int mode = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB);
         selectSeg(linkSeg, mode);
-        String desc = getString(LINK_DESC[mode]);
-        if (mode == Cfg.LINK_WIFI && on24GHz()) desc += "\n\n" + getString(R.string.wifi_24_warning);
-        linkDesc.setText(desc);
+        linkDesc.setText(LINK_DESC[mode]);
+        wifiWarn.setVisibility(mode == Cfg.LINK_WIFI && on24GHz() ? View.VISIBLE : View.GONE);
         netBody.setVisibility(mode == Cfg.LINK_USB ? View.GONE : View.VISIBLE);
         hostBox.setVisibility(mode == Cfg.LINK_WIFI || mode == Cfg.LINK_PAN ? View.VISIBLE : View.GONE);
         btBox.setVisibility(mode == Cfg.LINK_BT ? View.VISIBLE : View.GONE);
@@ -989,13 +1364,32 @@ public class MainActivity extends Activity {
         Stats.pinFails = 0;
         Stats.pinRetryAt = 0;
         Stats.pinMismatches = 0;
-        Toast.makeText(this, R.string.link_saved, Toast.LENGTH_SHORT).show();
+        notice(getString(R.string.link_saved));
+        onNetEdited();
         applyIfRunning();
+    }
+
+    /** Typing in the address / PIN: light up Save while it differs from what's saved; warn on an empty PIN. */
+    private void onNetEdited() {
+        String host = etHost.getText().toString().trim(), pin = etPin.getText().toString().trim();
+        boolean dirty = !host.equals(prefs.getString(Cfg.K_HOST, "")) || !pin.equals(prefs.getString(Cfg.K_PIN, ""));
+        btnSaveNet.setEnabled(dirty);
+        btnSaveNet.setText(dirty ? R.string.save_link : R.string.link_saved_all);
+        btnSaveNet.setTextColor(dirty ? 0xFFFFFFFF : TEXT2);
+        stylePill(btnSaveNet, dirty ? ACCENT : CARD_HI);
+        pinWarn.setVisibility(pin.isEmpty() ? View.VISIBLE : View.GONE);
+    }
+
+    /** Ports: say right away when they're out of range or repeated (Save would refuse them). */
+    private void onPortsEdited() {
+        int s = port(etSpkPort, -1), m = port(etMicPort, -1), c = port(etCamPort, -1);
+        boolean bad = s < 0 || m < 0 || c < 0 || s == m || s == c || m == c;
+        portsError.setVisibility(bad ? View.VISIBLE : View.GONE);
     }
 
     /**
      * Battery optimization lets the system (and Xiaomi-style ROMs much more) kill the bridge in the
-     * background. Ask once for the exemption; phone-bridge grants it over adb anyway.
+     * background. Ask once for the exemption; phonebridge grants it over adb anyway.
      */
     @SuppressWarnings("BatteryLife")   // exactly what this app needs: a long-running audio link
     private void askBatteryExemption() {
@@ -1060,7 +1454,8 @@ public class MainActivity extends Activity {
         if (save) prefs.edit().putInt(Cfg.K_SPK_VOL, sv).putInt(Cfg.K_MIC_VOL, mv).apply();
     }
 
-    private void showBuf() {
+    /** Returns the matching preset, -1 = custom. */
+    private int showBuf() {
         int out = sbBuf.getProgress() + Cfg.MIN_BUF_MS, mic = sbMicBuf.getProgress() + Cfg.MIN_BUF_MS;
         tvBuf.setText(getString(R.string.out_buffer_ms, out));
         tvMicBuf.setText(getString(R.string.mic_buffer_ms, mic));
@@ -1070,6 +1465,7 @@ public class MainActivity extends Activity {
         }
         selectSeg(presetSeg, sel);
         presetDesc.setText(sel >= 0 ? getString(PRESET_DESC[sel]) : getString(R.string.preset_custom_desc, out, mic));
+        return sel;
     }
 
     private void saveBuffers() {
@@ -1078,7 +1474,7 @@ public class MainActivity extends Activity {
                 .putInt(Cfg.K_MIC_BUF, sbMicBuf.getProgress() + Cfg.MIN_BUF_MS)
                 .apply();
         showBuf();
-        applyIfRunning();
+        settingChanged();
     }
 
     /** Valid port (1024..65535) or the old value. */
@@ -1098,7 +1494,7 @@ public class MainActivity extends Activity {
             return;
         }
         prefs.edit().putInt(Cfg.K_SPK_PORT, s).putInt(Cfg.K_MIC_PORT, m).putInt(Cfg.K_CAM_PORT, c).apply();
-        Toast.makeText(this, R.string.ports_saved, Toast.LENGTH_SHORT).show();
+        notice(getString(R.string.ports_saved));
         applyIfRunning();
     }
 
@@ -1117,7 +1513,7 @@ public class MainActivity extends Activity {
                 .apply();
         reflectPrefs();
         refreshDevices();
-        Toast.makeText(this, R.string.defaults_restored, Toast.LENGTH_SHORT).show();
+        notice(getString(R.string.defaults_restored));
         applyIfRunning();
     }
 
@@ -1161,6 +1557,7 @@ public class MainActivity extends Activity {
             clearSco();
             startService(new Intent(this, BridgeService.class).setAction(BridgeService.ACTION_STOP));
         } else {
+            saveNet();                       // an address / PIN still being typed counts
             askBatteryExemption();
             Stats.pinFails = 0;              // the user asked: try again right away
             Stats.pinRetryAt = 0;
@@ -1401,9 +1798,9 @@ public class MainActivity extends Activity {
         @Override public void onSurfaceTextureUpdated(SurfaceTexture st) {}
     };
 
-    /** The camera renders into the preview only while it is visible. */
+    /** The camera renders into the preview only while it is visible (app in front, Camera tab shown). */
     private void updatePreviewTarget() {
-        Surface want = resumed && swCam != null && swCam.isChecked() ? previewSurface : null;
+        Surface want = resumed && tab == TAB_CAM && swCam != null && swCam.isChecked() ? previewSurface : null;
         if (Stats.camPreview != want) Stats.camPreview = want;
     }
 
@@ -1481,6 +1878,8 @@ public class MainActivity extends Activity {
         am.registerAudioDeviceCallback(watcher, ui);
         getSystemService(DisplayManager.class).registerDisplayListener(displayListener, ui);
         updatePreviewTarget();
+        // back from the system settings: paired devices / Wi-Fi band may have changed
+        if (tab == TAB_LINK) showLink();
     }
 
     @Override
@@ -1497,18 +1896,35 @@ public class MainActivity extends Activity {
     private final Runnable tick = this::onTick;
     private final Runnable specTick = this::onSpecTick;
 
+    /** Spectrograms + mic meters, ~30 fps, only while a tab showing them is in front. */
     private void onSpecTick() {
-        if (swMic.isChecked()) svMic.update();
-        if (swSpk.isChecked()) svSpk.update();
-        micLevel.setPeak(Stats.micConnected ? Stats.micPeak : 0);
+        int peak = Stats.micConnected ? Stats.micPeak : 0;
+        if (tab == TAB_AUDIO) {
+            if (swMic.isChecked()) svMic.update();
+            if (swSpk.isChecked()) svSpk.update();
+            micLevel.setPeak(peak);
+        } else if (tab == TAB_HOME) {
+            homeMicLevel.setPeak(peak);
+        } else {
+            return;                                     // nothing live here; showTab restarts it
+        }
         ui.postDelayed(specTick, 33);
     }
 
-    private void setStatus(View dot, TextView status, TextView detail, int color, String s, String d) {
-        paintDot(dot, color);
-        status.setText(s);
-        detail.setText(d);
-        detail.setVisibility(d.isEmpty() ? View.GONE : View.VISIBLE);
+    /** Mute / Start buttons: restyled only when their state flips, not every tick. */
+    private void mutePill(Button b, boolean muted) {
+        if (Boolean.valueOf(muted).equals(b.getTag())) return;
+        b.setTag(muted);
+        b.setText(muted ? R.string.unmute : R.string.mute);
+        stylePill(b, muted ? RED : CARD_HI);
+    }
+
+    private void startPill(Button b, boolean run) {
+        if (Boolean.valueOf(run).equals(b.getTag())) return;
+        b.setTag(run);
+        b.setText(run ? R.string.stop : R.string.start);
+        stylePill(b, run ? CARD_HI : ACCENT);
+        b.setTextColor(run ? RED : 0xFFFFFFFF);
     }
 
     private void onTick() {
@@ -1529,64 +1945,61 @@ public class MainActivity extends Activity {
         boolean run = Stats.running;
         boolean spkOn = swSpk.isChecked(), micOn = swMic.isChecked(), camOn = swCam.isChecked();
         boolean capOn = swCap.isChecked();
-        boolean usb = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB) == Cfg.LINK_USB;
+        int mode = prefs.getInt(Cfg.K_LINK, Cfg.LINK_USB);
+        boolean usb = mode == Cfg.LINK_USB;
 
         // --- output
         if (!spkOn) {
-            setStatus(spkDot, spkStatus, spkDetail, GRAY, getString(R.string.st_off), "");
+            spkSt.set(GRAY, getString(R.string.st_off), "", false);
         } else if (!run) {
-            setStatus(spkDot, spkStatus, spkDetail, GRAY, getString(R.string.st_not_running), "");
+            spkSt.set(GRAY, getString(R.string.st_not_running), "", false);
         } else if (Stats.spkConnected) {
             int lat = Stats.spkLatencyMs >= 0 ? Stats.spkLatencyMs : Stats.spkQueuedMs;
-            setStatus(spkDot, spkStatus, spkDetail, Stats.muteSpk ? RED : GREEN,
+            spkSt.set(Stats.muteSpk ? RED : GREEN,
                     getString(Stats.muteSpk ? R.string.st_spk_muted : R.string.st_spk_on, lat),
                     getString(R.string.st_spk_detail, Stats.spkQueuedMs, Math.round(spkRate),
-                            Stats.spkUnderruns, Stats.spkDroppedMs));
+                            Stats.spkUnderruns, Stats.spkDroppedMs), false);
         } else {
-            setStatus(spkDot, spkStatus, spkDetail, AMBER, getString(R.string.st_waiting), Stats.spkError);
+            spkSt.set(AMBER, getString(R.string.st_waiting), Stats.spkError, true);
         }
-        btnMuteSpk.setText(Stats.muteSpk ? R.string.unmute : R.string.mute);
-        stylePill(btnMuteSpk, Stats.muteSpk ? RED : CARD_HI);
+        mutePill(btnMuteSpk, Stats.muteSpk);
 
         // --- mic
         if (!micOn) {
-            setStatus(micDot, micStatus, micDetail, GRAY, getString(R.string.st_off), "");
+            micSt.set(GRAY, getString(R.string.st_off), "", false);
         } else if (!run) {
-            setStatus(micDot, micStatus, micDetail, GRAY, getString(R.string.st_not_running),
-                    Stats.micError);
+            micSt.set(GRAY, getString(R.string.st_not_running), Stats.micError, true);
         } else if (Stats.micConnected) {
-            setStatus(micDot, micStatus, micDetail, Stats.muteMic ? RED : GREEN,
+            micSt.set(Stats.muteMic ? RED : GREEN,
                     getString(Stats.muteMic ? R.string.st_mic_muted : R.string.st_mic_on),
-                    getString(R.string.st_mic_detail, Math.round(micRate)));
+                    getString(R.string.st_mic_detail, Math.round(micRate)), false);
         } else {
-            setStatus(micDot, micStatus, micDetail, AMBER, getString(R.string.st_waiting), Stats.micError);
+            micSt.set(AMBER, getString(R.string.st_waiting), Stats.micError, true);
         }
-        btnMuteMic.setText(Stats.muteMic ? R.string.unmute : R.string.mute);
-        stylePill(btnMuteMic, Stats.muteMic ? RED : CARD_HI);
+        mutePill(btnMuteMic, Stats.muteMic);
 
         // --- camera
         if (!camOn) {
-            setStatus(camDot, camStatus, camDetail, GRAY, getString(R.string.st_off), "");
+            camSt.set(GRAY, getString(R.string.st_off), "", false);
         } else if (!run) {
-            setStatus(camDot, camStatus, camDetail, GRAY, getString(R.string.st_not_running), Stats.camError);
+            camSt.set(GRAY, getString(R.string.st_not_running), Stats.camError, true);
         } else if (Stats.camConnected) {
-            setStatus(camDot, camStatus, camDetail, GREEN,
-                    getString(Stats.camFront ? R.string.st_cam_front : R.string.st_cam_back),
-                    getString(R.string.st_cam_detail, Stats.camInfo, camFps, Math.round(camRate)));
+            camSt.set(GREEN, getString(Stats.camFront ? R.string.st_cam_front : R.string.st_cam_back),
+                    getString(R.string.st_cam_detail, Stats.camInfo, camFps, Math.round(camRate)), false);
         } else {
-            setStatus(camDot, camStatus, camDetail, AMBER, getString(R.string.st_waiting), Stats.camError);
+            camSt.set(AMBER, getString(R.string.st_waiting), Stats.camError, true);
         }
 
         // --- phone sound -> PC
         if (!capOn) {
-            setStatus(capDot, capStatus, capDetail, GRAY, getString(R.string.st_off), "");
+            capSt.set(GRAY, getString(R.string.st_off), "", false);
         } else if (!run) {
-            setStatus(capDot, capStatus, capDetail, GRAY, getString(R.string.st_not_running), Stats.capError);
+            capSt.set(GRAY, getString(R.string.st_not_running), Stats.capError, true);
         } else if (Stats.capConnected) {
-            setStatus(capDot, capStatus, capDetail, GREEN, getString(R.string.st_cap_on),
-                    getString(R.string.st_mic_detail, Math.round(capRate)));
+            capSt.set(GREEN, getString(R.string.st_cap_on),
+                    getString(R.string.st_mic_detail, Math.round(capRate)), false);
         } else {
-            setStatus(capDot, capStatus, capDetail, AMBER, getString(R.string.st_waiting), Stats.capError);
+            capSt.set(AMBER, getString(R.string.st_waiting), Stats.capError, true);
         }
 
         // --- overall
@@ -1595,32 +2008,65 @@ public class MainActivity extends Activity {
         if (spkOn) { if (Stats.spkConnected) live++; else waiting++; }
         if (micOn) { if (Stats.micConnected) live++; else waiting++; }
         if (camOn) { if (Stats.camConnected) live++; else waiting++; }
+        int color, title, hint;
         if (!run) {
-            paintDot(heroDot, GRAY);
-            heroTitle.setText(R.string.hero_stopped);
-            heroHint.setText(R.string.hero_stopped_hint);
+            color = GRAY;
+            title = R.string.hero_stopped;
+            hint = R.string.hero_stopped_hint;
         } else if (live > 0 && waiting == 0) {
-            paintDot(heroDot, GREEN);
-            heroTitle.setText(R.string.hero_connected);
-            heroHint.setText(R.string.hero_connected_hint);
+            color = GREEN;
+            title = R.string.hero_connected;
+            hint = R.string.hero_connected_hint;
         } else if (live > 0) {
-            paintDot(heroDot, AMBER);
-            heroTitle.setText(R.string.hero_partial);
-            heroHint.setText(R.string.hero_partial_hint);
+            color = AMBER;
+            title = R.string.hero_partial;
+            hint = R.string.hero_partial_hint;
         } else if (waiting == 0) {
-            paintDot(heroDot, AMBER);
-            heroTitle.setText(R.string.hero_nothing);
-            heroHint.setText(R.string.hero_nothing_hint);
+            color = AMBER;
+            title = R.string.hero_nothing;
+            hint = R.string.hero_nothing_hint;
         } else {
-            paintDot(heroDot, AMBER);
-            heroTitle.setText(R.string.hero_waiting);
-            heroHint.setText(usb ? R.string.hero_waiting_hint : R.string.hero_waiting_net_hint);
+            color = AMBER;
+            title = R.string.hero_waiting;
+            hint = usb ? R.string.hero_waiting_hint : R.string.hero_waiting_net_hint;
         }
-        linkWhere.setText(!usb && run && live > 0 ? getString(R.string.link_where, Stats.linkWhere) : "");
-        linkWhere.setVisibility(linkWhere.length() > 0 ? View.VISIBLE : View.GONE);
-        btnStart.setText(run ? R.string.stop : R.string.start);
-        stylePill(btnStart, run ? CARD_HI : ACCENT);
-        btnStart.setTextColor(run ? RED : 0xFFFFFFFF);
+        if (color != overallColor) {
+            overallColor = color;
+            paintDot(heroDot, color);
+            paintDot(stripDot, color);
+        }
+        setIfChanged(heroTitle, getText(title));
+        setIfChanged(stripTitle, getText(title));
+        setIfChanged(heroHint, getText(hint));
+        startPill(btnStart, run);
+        startPill(stripBtn, run);
+
+        // --- connection: where the streams went, or the first thing stopping them
+        String where = !usb && run && live > 0 ? getString(R.string.link_where, Stats.linkWhere) : "";
+        setIfChanged(linkWhere, where);
+        linkWhere.setVisibility(where.isEmpty() ? View.GONE : View.VISIBLE);
+        String problem = "";
+        if (run && live == 0) {
+            for (String e : new String[]{spkOn ? Stats.spkError : "", micOn ? Stats.micError : "",
+                    capOn ? Stats.capError : "", camOn ? Stats.camError : ""}) {
+                if (e != null && !e.isEmpty()) {
+                    problem = e;
+                    break;
+                }
+            }
+        }
+        setIfChanged(linkProblem, problem);
+        linkProblem.setVisibility(problem.isEmpty() ? View.GONE : View.VISIBLE);
+        String linkName = getString(LINK_NAMES[mode]);
+        if (!usb && prefs.getString(Cfg.K_PIN, "").trim().isEmpty()) {
+            linkSt.set(AMBER, linkName, getString(R.string.err_no_pin), true);
+        } else if (run && live > 0) {
+            linkSt.set(GREEN, linkName, where, false);
+        } else if (run) {
+            linkSt.set(AMBER, linkName, problem, true);
+        } else {
+            linkSt.set(GRAY, linkName, "", false);
+        }
 
         ui.postDelayed(tick, 250);
     }

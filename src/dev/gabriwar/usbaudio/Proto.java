@@ -13,9 +13,9 @@ import javax.crypto.spec.GCMParameterSpec;
 import javax.crypto.spec.SecretKeySpec;
 
 /**
- * Wire protocol between the app and pc/bin/phone-relay for the Wi-Fi / Bluetooth links (USB uses
+ * Wire protocol between the app and pc/phonebridge (relay.go) for the Wi-Fi / Bluetooth links (USB uses
  * raw PCM over the adb tunnel instead). Pure Java on purpose: the PC test harness runs it too.
- * pc/bin/phone-relay implements the other end and must stay in sync with this file.
+ * pc/phonebridge (relay.go) implements the other end and must stay in sync with this file.
  *
  * Messages, first byte = type ("|" = concatenation, numbers big endian):
  *   HELLO   'H' | ver(1) | role(1) | flags(1) | sid(8) | X(256)       phone -> PC

@@ -29,12 +29,12 @@ import java.util.List;
 import java.util.UUID;
 
 /**
- * One stream to pc/bin/phone-relay: UDP over Wi-Fi / Bluetooth tethering (TCP for the camera, it
+ * One stream to pc/phonebridge (relay.go): UDP over Wi-Fi / Bluetooth tethering (TCP for the camera, it
  * must not lose data), or RFCOMM for Bluetooth direct. Does the PIN handshake, then carries sealed
  * DATA messages (see Proto). close() may be called from another thread to unblock the pipe.
  */
 final class Remote implements Closeable {
-    private static final String BT_UUID = "a8f3c5d0-5b1e-4c7a-9e2d-7f10c0de000";   // + role (phone-relay)
+    private static final String BT_UUID = "a8f3c5d0-5b1e-4c7a-9e2d-7f10c0de000";   // + role (phonebridge)
     private static final int TOS_VOICE = 0xB8, TOS_VIDEO = 0x88;  // DSCP EF / AF41: Wi-Fi voice / video queue
     private static final long PING_MS = 1000, DEAD_MS = 6000, HANDSHAKE_MS = 4000;
     private static final int MAX_MSG = 4 << 20;
@@ -122,7 +122,7 @@ final class Remote implements Closeable {
         return discover();
     }
 
-    /** Broadcast WHO on every interface (Wi-Fi, Bluetooth tethering...) until phone-relay answers. */
+    /** Broadcast WHO on every interface (Wi-Fi, Bluetooth tethering...) until phonebridge answers. */
     private InetAddress discover() throws IOException {
         List<InetAddress> targets = new ArrayList<>();
         try {

@@ -13,7 +13,7 @@ import java.util.Arrays;
 
 /**
  * 5 ms PCM chunks to/from the PC over whatever link is set: raw PCM over the USB tunnel straight to
- * PipeWire, or Remote packets (PCM or Opus) to phone-relay. Lost packets are concealed (Opus PLC
+ * PipeWire, or Remote packets (PCM or Opus) to phonebridge. Lost packets are concealed (Opus PLC
  * or silence) so the timing downstream stays right.
  */
 final class AudioLink implements Closeable {

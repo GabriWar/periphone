@@ -17,7 +17,7 @@ import java.net.SocketException;
 import java.util.Arrays;
 
 /**
- * PC -> phone. Reads PCM S16LE stereo 48 kHz (over the USB tunnel, or from phone-relay over
+ * PC -> phone. Reads PCM S16LE stereo 48 kHz (over the USB tunnel, or from phonebridge over
  * Wi-Fi / Bluetooth, see AudioLink) and plays it on an AudioTrack.
  *
  * The delay that matters is what sits in the AudioTrack queue (written - played), so that is what
