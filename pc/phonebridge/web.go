@@ -203,7 +203,7 @@ func openWindow(url string) {
 	for _, b := range []string{"chromium", "google-chrome-stable", "google-chrome", "brave", "brave-browser",
 		"microsoft-edge-stable", "microsoft-edge", "vivaldi-stable", "vivaldi"} {
 		if p, err := exec.LookPath(b); err == nil {
-			exec.Command(p, "--app="+url, "--window-size=520,900", "--class=phonebridge").Start()
+			exec.Command(p, "--app="+url, "--window-size=1180,780", "--class=phonebridge").Start()
 			return
 		}
 	}
