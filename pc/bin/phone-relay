@@ -15,7 +15,6 @@ Links:
 The protocol is documented in src/dev/gabriwar/usbaudio/Proto.java; keep both in sync.
 """
 import argparse
-import collections
 import ctypes
 import ctypes.util
 import hashlib
@@ -111,15 +110,24 @@ class HandshakeError(Exception):
 
 
 class Handshaker:
-    """PC side of the PIN check. Wrong PINs slow everybody down: one guess per second at most."""
+    """PC side of the PIN check.
+
+    Every REPLY is one PIN guess for whoever sent the HELLO (they can check our proof against
+    their guess), whether or not they ever confirm. So each REPLY spends a token and only a valid
+    CONFIRM gives it back: a real phone costs nothing, a guesser gets ~1 try per 10 s
+    (a 6-digit PIN would take ~2 months on average).
+    """
+
+    BUCKET, REFILL_S = 8.0, 10.0   # 8 = a few streams starting at once, with room for retries
 
     def __init__(self, pin):
         self.w = int.from_bytes(sha256(b"UAB-PIN", pin.encode()), "big") % Q
         self.m_inv_w = pow(M, (Q - self.w) % Q, P)
         self.n_w = pow(N, self.w, P)
         self.lock = threading.Lock()
-        self.last_fail = 0.0
-        self.recent = collections.deque()
+        self.tokens = self.BUCKET
+        self.t = time.monotonic()
+        self.warned = 0.0
 
     def reply(self, hello):
         """HELLO -> (role, flags, sid, REPLY bytes, keys). Raises HandshakeError."""
@@ -129,17 +137,21 @@ class Handshaker:
         sid = hello[4:12]
         if ver != VERSION or role not in ROLE_NAMES:
             raise HandshakeError(E_UNSUPPORTED)
-        now = time.monotonic()
-        with self.lock:
-            while self.recent and now - self.recent[0] > 1.0:
-                self.recent.popleft()
-            if now - self.last_fail < 1.0 or len(self.recent) >= 20:
-                raise HandshakeError(E_BUSY)
-            self.recent.append(now)
         Xb = hello[12:]
         X = int.from_bytes(Xb, "big")
         if not in_group(X):
             raise HandshakeError(E_UNSUPPORTED)
+        now = time.monotonic()
+        with self.lock:
+            self.tokens = min(self.BUCKET, self.tokens + (now - self.t) / self.REFILL_S)
+            self.t = now
+            if self.tokens < 1:
+                if now - self.warned > 60:
+                    self.warned = now
+                    log("many unfinished or wrong PIN attempts: slowing down handshakes"
+                        " (someone guessing the PIN? change it with: phone-bridge pin new)")
+                raise HandshakeError(E_BUSY)
+            self.tokens -= 1
         y = secrets.randbits(256) + 1
         Yb = i2b(pow(G, y, P) * self.n_w % P)
         K = pow(X * self.m_inv_w % P, y, P)
@@ -148,9 +160,9 @@ class Handshaker:
 
     def check(self, keys, confirm):
         ok = len(confirm) == CONFIRM_LEN and hmac.compare_digest(confirm[9:], keys.phone_confirm)
-        if not ok:
+        if ok:
             with self.lock:
-                self.last_fail = time.monotonic()
+                self.tokens = min(self.BUCKET, self.tokens + 1)
         return ok
 
 

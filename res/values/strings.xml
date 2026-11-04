@@ -180,6 +180,7 @@
     <string name="err_pc_no_answer">The PC at %1$s doesn\'t answer (phone-bridge --wifi running? firewall allows port 12350?)</string>
     <string name="err_relay_down">Nothing is listening on %1$s:12350. Run phone-bridge --wifi on the PC.</string>
     <string name="err_wrong_pin">Wrong PIN: use the one phone-bridge shows on the PC</string>
+    <string name="err_wrong_pin_stopped">Wrong PIN (stopped retrying): fix the PIN or tap Stop and Start</string>
     <string name="err_pc_side_down">The PC side of this stream isn\'t running (PipeWire configs / camera receiver?)</string>
     <string name="err_pc_busy">The PC is slowing down attempts after a wrong PIN; retrying…</string>
     <string name="err_pc_restarted">The PC side restarted; reconnecting…</string>

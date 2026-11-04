@@ -75,6 +75,7 @@ final class Remote implements Closeable {
 
     void connect() throws IOException {
         if (link.pin.isEmpty()) throw fail(R.string.err_no_pin);
+        if (link.sig().equals(Stats.badPinSig)) throw fail(R.string.err_wrong_pin_stopped);
         Proto.Client hs = new Proto.Client(role, link.flags(), link.pin);
         String where;
         if (link.mode == Cfg.LINK_BT) {
@@ -174,7 +175,7 @@ final class Remote implements Closeable {
             int n = recvUdp();
             if (n == Proto.REPLY_LEN && buf[0] == 'R' && hs.sameSid(buf, 1)) {
                 confirm = hs.finish(Arrays.copyOf(buf, n));
-                if (confirm == null) throw fail(R.string.err_wrong_pin);
+                if (confirm == null) throw wrongPin();
             } else if (n >= 10 && buf[0] == 'E' && hs.sameSid(buf, 1)) {
                 throw error(buf[9]);
             }
@@ -242,7 +243,7 @@ final class Remote implements Closeable {
         if (n >= 10 && buf[0] == 'E') throw error(buf[9]);
         if (n != Proto.REPLY_LEN || buf[0] != 'R' || !hs.sameSid(buf, 1)) throw fail(R.string.err_pc_unsupported);
         byte[] confirm = hs.finish(Arrays.copyOf(buf, n));
-        if (confirm == null) throw fail(R.string.err_wrong_pin);
+        if (confirm == null) throw wrongPin();
         writeMsg(confirm, confirm.length);
         n = readMsg();
         if (n >= 10 && buf[0] == 'E') throw error(buf[9]);
@@ -250,9 +251,16 @@ final class Remote implements Closeable {
         if (stream instanceof Socket) ((Socket) stream).setSoTimeout(0);
     }
 
+    /** PIN mismatch: stop retrying these settings until the user changes them or taps Start. */
+    private IOException wrongPin() {
+        Stats.badPinSig = link.sig();
+        if (discovered) Stats.pcAddr = null;   // maybe we found the wrong PC: look again next time
+        return fail(R.string.err_wrong_pin);
+    }
+
     private IOException error(int code) {
         switch (code) {
-            case Proto.E_PIN: return fail(R.string.err_wrong_pin);
+            case Proto.E_PIN: return wrongPin();
             case Proto.E_DOWN: return fail(R.string.err_pc_side_down);
             case Proto.E_BUSY: return fail(R.string.err_pc_busy);
             case Proto.E_UNKNOWN: return fail(R.string.err_pc_restarted);
