@@ -1,60 +1,114 @@
 package main
 
 // The window: a small web UI on 127.0.0.1, opened as an app window (Chromium-family --app) or in
-// the default browser. Only reachable with the random token in its URL, and only under the
-// 127.0.0.1 host name: web pages you visit can't drive it (no CSRF, no DNS rebinding).
+// the default browser.
+//
+// Access: the browser is launched with a one-time link (/open/<nonce>, single use, 60 s) that sets
+// an HttpOnly SameSite=Strict cookie holding the session token; the page and the API need that
+// cookie. So the token never appears on a command line (/proc is readable by other local users)
+// or in the log, web pages you visit can't drive it (no CSRF), and other host names are refused
+// (no DNS rebinding).
 
 import (
 	"crypto/rand"
+	"crypto/subtle"
 	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"net"
 	"net/http"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"strings"
+	"sync"
+	"time"
 )
 
 //go:embed ui.html
 var uiHTML []byte
 
-func urlFile() string { return filepath.Join(runtimeDir(), "phonebridge.url") }
+const cookieName = "phonebridge"
 
-// serveWeb starts the UI server and returns its URL.
-func serveWeb(c *controller, quit func()) (string, error) {
+type webUI struct {
+	host   string
+	token  string
+	mu     sync.Mutex
+	nonces map[string]time.Time
+}
+
+func randHex(n int) string {
+	b := make([]byte, n)
+	rand.Read(b)
+	return hex.EncodeToString(b)
+}
+
+const notOpened = `<!doctype html><meta charset="utf-8"><title>Phone Bridge</title>
+<body style="background:#0F1115;color:#ECEFF4;font:15px system-ui;padding:32px">
+<h2>Phone Bridge</h2><p>This link was already used or has expired.</p>
+<p>Open the window from the tray icon, or run <code>phonebridge</code> again.</p></body>`
+
+// serveWeb starts the UI server; the returned func opens a window on it.
+func serveWeb(c *controller, quit func()) (open func(), err error) {
 	l, err := net.Listen("tcp4", "127.0.0.1:0")
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	tok := make([]byte, 16)
-	rand.Read(tok)
-	token := hex.EncodeToString(tok)
-	host := l.Addr().String()
-	base := "/" + token + "/"
+	w := &webUI{host: l.Addr().String(), token: randHex(16), nonces: map[string]time.Time{}}
 
+	authed := func(r *http.Request) bool {
+		ck, err := r.Cookie(cookieName)
+		return err == nil && subtle.ConstantTimeCompare([]byte(ck.Value), []byte(w.token)) == 1
+	}
 	mux := http.NewServeMux()
-	mux.HandleFunc(base, func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		w.Write(uiHTML)
+	mux.HandleFunc("/open/", func(rw http.ResponseWriter, r *http.Request) {
+		n := strings.TrimPrefix(r.URL.Path, "/open/")
+		w.mu.Lock()
+		t, ok := w.nonces[n]
+		delete(w.nonces, n) // single use
+		w.mu.Unlock()
+		if !ok || time.Since(t) > time.Minute {
+			rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+			rw.WriteHeader(http.StatusForbidden)
+			rw.Write([]byte(notOpened))
+			return
+		}
+		http.SetCookie(rw, &http.Cookie{Name: cookieName, Value: w.token, Path: "/",
+			HttpOnly: true, SameSite: http.SameSiteStrictMode})
+		http.Redirect(rw, r, "/", http.StatusSeeOther)
 	})
-	mux.HandleFunc(base+"api/state", func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(c.snapshot())
+	mux.HandleFunc("/{$}", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "text/html; charset=utf-8")
+		rw.Header().Set("Cache-Control", "no-store")
+		if !authed(r) {
+			rw.WriteHeader(http.StatusForbidden)
+			rw.Write([]byte(notOpened))
+			return
+		}
+		rw.Write(uiHTML)
+	})
+	api := func(path string, h http.HandlerFunc) {
+		mux.HandleFunc("/api/"+path, func(rw http.ResponseWriter, r *http.Request) {
+			if !authed(r) {
+				http.Error(rw, "not allowed", http.StatusForbidden)
+				return
+			}
+			h(rw, r)
+		})
+	}
+	api("state", func(rw http.ResponseWriter, r *http.Request) {
+		rw.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(rw).Encode(c.snapshot())
 	})
 	post := func(path string, f func(r *http.Request) error) {
-		mux.HandleFunc(base+"api/"+path, func(w http.ResponseWriter, r *http.Request) {
+		api(path, func(rw http.ResponseWriter, r *http.Request) {
 			if r.Method != http.MethodPost {
-				http.Error(w, "POST only", http.StatusMethodNotAllowed)
+				http.Error(rw, "POST only", http.StatusMethodNotAllowed)
 				return
 			}
 			if err := f(r); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
+				http.Error(rw, err.Error(), http.StatusBadRequest)
 				return
 			}
-			w.WriteHeader(http.StatusNoContent)
+			rw.WriteHeader(http.StatusNoContent)
 		})
 	}
 	post("apply", func(r *http.Request) error {
@@ -82,20 +136,33 @@ func serveWeb(c *controller, quit func()) (string, error) {
 	post("pin", func(*http.Request) error { go c.newPIN(); return nil })
 	post("quit", func(*http.Request) error { go quit(); return nil })
 
-	srv := &http.Server{Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Host != host || !strings.HasPrefix(r.URL.Path, base) { // other sites / rebinding
-			http.NotFound(w, r)
+	srv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {
+		if r.Host != w.host { // other sites / DNS rebinding
+			http.NotFound(rw, r)
 			return
 		}
-		mux.ServeHTTP(w, r)
+		mux.ServeHTTP(rw, r)
 	})}
 	go srv.Serve(l)
-	url := "http://" + host + base
-	os.WriteFile(urlFile(), []byte(url+"\n"), 0o600)
-	return url, nil
+	logf("window: http://%s/", w.host)
+	return w.open, nil
 }
 
-// openWindow opens the UI: an app window if a Chromium-family browser is there, else the browser.
+// open launches a window with a fresh one-time link.
+func (w *webUI) open() {
+	n := randHex(16)
+	w.mu.Lock()
+	for k, t := range w.nonces {
+		if time.Since(t) > time.Minute {
+			delete(w.nonces, k)
+		}
+	}
+	w.nonces[n] = time.Now()
+	w.mu.Unlock()
+	openWindow("http://" + w.host + "/open/" + n)
+}
+
+// openWindow: an app window if a Chromium-family browser is there, else the default browser.
 func openWindow(url string) {
 	for _, b := range []string{"chromium", "google-chrome-stable", "google-chrome", "brave", "brave-browser",
 		"microsoft-edge-stable", "microsoft-edge", "vivaldi-stable", "vivaldi"} {
@@ -105,20 +172,6 @@ func openWindow(url string) {
 		}
 	}
 	if exec.Command("xdg-open", url).Start() != nil {
-		logf("open this in a browser: %s", url)
+		logf("couldn't open a browser: open the window from the tray")
 	}
-}
-
-// openRunningWindow: phonebridge is already running: show its window instead.
-func openRunningWindow() bool {
-	b, err := os.ReadFile(urlFile())
-	if err != nil {
-		return false
-	}
-	url := strings.TrimSpace(string(b))
-	if url == "" {
-		return false
-	}
-	openWindow(url)
-	return true
 }

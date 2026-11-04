@@ -130,10 +130,15 @@ func lock() (*os.File, error) {
 	return f, nil
 }
 
-func stopRunning() {
+// signalRunning sends sig to the running phonebridge (pid in the lock file).
+func signalRunning(sig syscall.Signal) bool {
 	b, err := os.ReadFile(filepath.Join(runtimeDir(), "phonebridge.lock"))
 	pid, _ := strconv.Atoi(strings.TrimSpace(string(b)))
-	if err != nil || pid <= 0 || syscall.Kill(pid, syscall.SIGTERM) != nil {
+	return err == nil && pid > 0 && syscall.Kill(pid, sig) == nil
+}
+
+func stopRunning() {
+	if !signalRunning(syscall.SIGTERM) {
 		fmt.Println("no phonebridge running.")
 		return
 	}
@@ -234,7 +239,7 @@ func main() {
 
 	lk, err := lock()
 	if err != nil {
-		if !*noTray && openRunningWindow() {
+		if !*noTray && signalRunning(syscall.SIGUSR1) {
 			fmt.Println("phonebridge is already running: opened its window.")
 			return
 		}
@@ -267,13 +272,17 @@ func runGUI(opt options, showWindow bool) {
 			}
 		})
 	}
-	url, err := serveWeb(c, stop)
+	open, err := serveWeb(c, stop)
 	if err != nil {
 		fail(err)
 	}
-	defer os.Remove(urlFile())
-	open := func() { openWindow(url) }
-	logf("window: %s", url)
+	usr1 := make(chan os.Signal, 1) // another "phonebridge" launch: show the window
+	signal.Notify(usr1, syscall.SIGUSR1)
+	go func() {
+		for range usr1 {
+			open()
+		}
+	}()
 	go c.restart()
 	if showWindow || !tray {
 		open()

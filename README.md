@@ -160,10 +160,11 @@ a C compiler, cmake; downloads libopus with a pinned checksum).
   without cleaning up, the next start removes the leftovers.
 - **Window**: status, the link, each stream with an on/off switch and a live level meter,
   camera, codec / encryption / buffer / mic mode, the PIN (copy, new), whether adb reaches the
-  phone, warnings and a log. It is a small web UI served on 127.0.0.1 (random token in the URL,
-  other host names refused, so web pages can't drive it), opened as an app window by Chromium /
-  Chrome / Brave / Edge / Vivaldi if installed, else in your browser. Running `phonebridge` again
-  reopens it.
+  phone, warnings and a log. It is a small web UI on 127.0.0.1, opened as an app window by Chromium /
+  Chrome / Brave / Edge / Vivaldi if installed, else in your browser; running `phonebridge` again
+  reopens it. The browser gets a one-time link that sets an HttpOnly cookie, so the session token
+  is never on a command line or in the log; other host names are refused and web pages you visit
+  can't drive it.
 - **Tray icon**: color = state (gray stopped, amber waiting, green connected, red error); click to
   open the window; the menu switches the link and streams, starts/stops, shows the PIN. Works with
   KDE, XFCE, Cinnamon, sway/waybar...; GNOME needs the AppIndicator extension (the window works
