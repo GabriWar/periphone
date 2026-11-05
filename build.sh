@@ -20,7 +20,7 @@ if [ -n "${JAVA_HOME:-}" ]; then JAVAC="$JAVA_HOME/bin/javac"
 elif [ -x /usr/lib/jvm/java-21-openjdk/bin/javac ]; then JAVAC=/usr/lib/jvm/java-21-openjdk/bin/javac
 else JAVAC=javac; fi
 
-OUT=usb-audio-bridge.apk
+OUT=periphone.apk
 B=build
 echo "build-tools $BT_VER, $PLAT, $("$JAVAC" -version 2>&1)"
 
@@ -76,7 +76,7 @@ done
 
 [ -f debug.keystore ] || keytool -genkeypair -keystore debug.keystore \
     -storepass android -keypass android -alias debug -keyalg RSA -keysize 2048 \
-    -validity 10000 -dname "CN=usb-audio-bridge" >/dev/null 2>&1
+    -validity 10000 -dname "CN=periphone" >/dev/null 2>&1
 
 "$BT/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android \
     --out "$OUT" "$B/aligned.apk"

@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    package="dev.gabriwar.usbaudio">
+    package="dev.gabriwar.periphone">
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
     <uses-feature android:name="android.hardware.microphone" android:required="false" />
@@ -44,7 +44,7 @@
             </intent-filter>
         </activity>
 
-        <!-- Autostart entry point for phonebridge (am start with the autostart extra).
+        <!-- Autostart entry point for periphone (am start with the autostart extra).
              DUMP is held by the adb shell but can't be obtained by normal apps, so no other app
              can turn on the mic/camera or redirect the streams to its own port. -->
         <activity-alias

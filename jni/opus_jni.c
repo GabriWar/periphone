@@ -1,10 +1,10 @@
-/* JNI glue for dev.gabriwar.usbaudio.Opus: libopus encoder/decoder on S16LE byte arrays.
+/* JNI glue for dev.gabriwar.periphone.Opus: libopus encoder/decoder on S16LE byte arrays.
  * 48 kHz only. Handles are the raw OpusEncoder / OpusDecoder pointers. */
 #include <jni.h>
 #include <stdint.h>
 #include <opus.h>
 
-#define FN(name) Java_dev_gabriwar_usbaudio_Opus_##name
+#define FN(name) Java_dev_gabriwar_periphone_Opus_##name
 
 JNIEXPORT jlong JNICALL FN(encCreate)(JNIEnv *env, jclass c, jint channels, jint bitrate) {
     int err = 0;

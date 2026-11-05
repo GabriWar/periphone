@@ -1,13 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!-- Periphone: a phone sending/receiving on both sides. Symmetric around (54,54), inside the
+     66 dp safe zone of the 108 dp adaptive icon, so every launcher mask keeps it centered. -->
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="108dp" android:height="108dp"
     android:viewportWidth="108" android:viewportHeight="108">
+    <!-- phone -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3.5" android:fillColor="#00000000"
+        android:pathData="M47.5,33h13a4.5,4.5 0 0,1 4.5,4.5v33a4.5,4.5 0 0,1 -4.5,4.5h-13a4.5,4.5 0 0,1 -4.5,-4.5v-33a4.5,4.5 0 0,1 4.5,-4.5z" />
     <path android:fillColor="#FFFFFFFF"
-        android:pathData="M36,46h10l14,-12v40l-14,-12h-10z" />
-    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4"
-        android:strokeLineCap="round" android:fillColor="#00000000"
-        android:pathData="M68,44a14,14 0 0,1 0,20" />
-    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="4"
-        android:strokeLineCap="round" android:fillColor="#00000000"
-        android:pathData="M74,36a24,24 0 0,1 0,36" />
+        android:pathData="M50.5,68.5h7a1.5,1.5 0 0,1 0,3h-7a1.5,1.5 0 0,1 0,-3z" />
+    <!-- waves, right -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M71,47a9,9 0 0,1 0,14" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M77,41.5a17,17 0 0,1 0,25" />
+    <!-- waves, left (mirror) -->
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M37,47a9,9 0 0,0 0,14" />
+    <path android:strokeColor="#FFFFFFFF" android:strokeWidth="3.5" android:strokeLineCap="round"
+        android:fillColor="#00000000" android:pathData="M31,41.5a17,17 0 0,0 0,25" />
 </vector>

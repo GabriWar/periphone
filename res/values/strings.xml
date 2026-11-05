@@ -1,6 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">USB Audio Bridge</string>
+    <string name="app_name">Periphone</string>
     <string name="tagline">PC audio, mic and camera over USB, Wi-Fi or Bluetooth</string>
 
     <!-- tabs -->
@@ -16,10 +16,10 @@
     <string name="start">Start</string>
     <string name="stop">Stop</string>
     <string name="hero_stopped">Stopped</string>
-    <string name="hero_stopped_hint">Run <b>phonebridge</b> on the PC and pick the link in its window (or --wifi, --pan, --bt), or tap Start.</string>
+    <string name="hero_stopped_hint">Run <b>periphone</b> on the PC and pick the link in its window (or --wifi, --pan, --bt), or tap Start.</string>
     <string name="hero_waiting">Waiting for the PC…</string>
-    <string name="hero_waiting_hint">Is <b>phonebridge</b> running on the PC? It sets up the USB tunnel (adb reverse).</string>
-    <string name="hero_waiting_net_hint">Is <b>phonebridge --wifi</b> (or --pan / --bt) running on the PC, and is the PIN the one it shows?</string>
+    <string name="hero_waiting_hint">Is <b>periphone</b> running on the PC? It sets up the USB tunnel (adb reverse).</string>
+    <string name="hero_waiting_net_hint">Is <b>periphone --wifi</b> (or --pan / --bt) running on the PC, and is the PIN the one it shows?</string>
     <string name="hero_partial">Partially connected</string>
     <string name="hero_partial_hint">Some streams are still waiting for the PC. See below.</string>
     <string name="hero_connected">Connected to the PC</string>
@@ -48,16 +48,16 @@
     <string name="link_wifi">Wi-Fi</string>
     <string name="link_pan">BT net</string>
     <string name="link_bt">BT direct</string>
-    <string name="link_usb_desc">Through the cable (adb). Lowest delay, nothing to set up here. On the PC: phonebridge</string>
-    <string name="link_wifi_desc">Same Wi-Fi as the PC, audio over UDP. The delay adapts to how steady the Wi-Fi is. On the PC: phonebridge --wifi</string>
-    <string name="link_pan_desc">Bluetooth tethering: turn it on in Settings › Network › Hotspot &amp; tethering. Audio is compressed (Opus). On the PC: phonebridge --pan</string>
-    <string name="link_bt_desc">Straight to the paired PC over Bluetooth, no tethering. Audio is compressed (Opus); no camera (too little bandwidth). On the PC: phonebridge --bt</string>
+    <string name="link_usb_desc">Through the cable (adb). Lowest delay, nothing to set up here. On the PC: periphone</string>
+    <string name="link_wifi_desc">Same Wi-Fi as the PC, audio over UDP. The delay adapts to how steady the Wi-Fi is. On the PC: periphone --wifi</string>
+    <string name="link_pan_desc">Bluetooth tethering: turn it on in Settings › Network › Hotspot &amp; tethering. Audio is compressed (Opus). On the PC: periphone --pan</string>
+    <string name="link_bt_desc">Straight to the paired PC over Bluetooth, no tethering. Audio is compressed (Opus); no camera (too little bandwidth). On the PC: periphone --bt</string>
     <string name="wifi_24_warning">⚠ This phone is on 2.4 GHz Wi-Fi: expect dropouts and extra delay. Put the phone and the PC on 5 GHz.</string>
     <string name="pc_address">PC address</string>
     <string name="pc_address_hint">Empty = find it automatically</string>
     <string name="bt_pc">PC (paired device)</string>
     <string name="bt_none_paired">Nothing paired: pair the PC in the Bluetooth settings</string>
-    <string name="pin">PIN (phonebridge shows it on the PC)</string>
+    <string name="pin">PIN (periphone shows it on the PC)</string>
     <string name="pin_hint">6 digits</string>
     <string name="encrypt">Encrypt (AES-128-GCM)</string>
     <string name="codec">Audio codec</string>
@@ -90,6 +90,11 @@
     <string name="src_raw">Raw (no processing)</string>
     <string name="src_recognition">Voice recognition</string>
     <string name="src_camcorder">Camcorder</string>
+
+    <!-- spectrogram captions: which way the sound goes, seen from the phone -->
+    <string name="spec_in_spk">↓ Coming in from the PC</string>
+    <string name="spec_out_mic">↑ Going out to the PC (mic)</string>
+    <string name="spec_out_cap">↑ Going out to the PC (phone audio)</string>
 
     <!-- phone sound -> PC -->
     <string name="cap_title">Phone audio → PC</string>
@@ -137,14 +142,14 @@
     <string name="port_out">Output</string>
     <string name="port_mic">Mic</string>
     <string name="port_cam">Camera</string>
-    <string name="ports_hint">phonebridge on the PC uses 12345 / 12346 / 12347: keep these unless you know why.</string>
+    <string name="ports_hint">periphone on the PC uses 12345 / 12346 / 12347: keep these unless you know why.</string>
     <string name="apply_ports">Save ports</string>
     <string name="ports_invalid">Ports must be 1024–65535 and all different</string>
     <string name="ports_saved">Ports saved</string>
     <string name="reset_defaults">Reset to defaults</string>
     <string name="defaults_restored">Defaults restored</string>
     <string name="reset_confirm">Reset volumes, latency, mic mode, camera, audio device and port settings to their defaults? Which streams are on, the connection, the address and the PIN stay as they are.</string>
-    <string name="footer">v%1$s · PC side: phonebridge (pc/phonebridge; phonebridge install once)</string>
+    <string name="footer">v%1$s · PC side: periphone (pc/periphone; periphone install once)</string>
 
     <!-- phone audio devices -->
     <string name="dev_auto">Automatic (Android default)</string>
@@ -161,7 +166,7 @@
 
     <!-- notification -->
     <string name="notif_channel">Audio bridge</string>
-    <string name="notif_title">USB Audio Bridge is running</string>
+    <string name="notif_title">Periphone is running</string>
     <string name="notif_audio">PC audio</string>
     <string name="notif_mic">Mic</string>
     <string name="notif_mic_muted">Mic muted</string>
@@ -172,10 +177,10 @@
     <string name="unmute_mic">Unmute mic</string>
 
     <!-- errors -->
-    <string name="err_no_tunnel">No USB tunnel on port %1$d. Run phonebridge on the PC.</string>
-    <string name="err_pc_closed">The PC closed the connection (is phonebridge running?)</string>
+    <string name="err_no_tunnel">No USB tunnel on port %1$d. Run periphone on the PC.</string>
+    <string name="err_pc_closed">The PC closed the connection (is periphone running?)</string>
     <string name="err_pc_not_listening">Nothing is listening on PC port %1$d (PipeWire config installed?)</string>
-    <string name="err_cam_pc">The PC camera receiver isn\'t running on port %1$d (needs v4l2loopback, see phonebridge)</string>
+    <string name="err_cam_pc">The PC camera receiver isn\'t running on port %1$d (needs v4l2loopback, see periphone)</string>
     <string name="err_audio_track">Audio output error %1$d</string>
     <string name="err_audio_record">Mic read error %1$d</string>
     <string name="err_mic_open">Can\'t open the mic: %1$s</string>
@@ -189,23 +194,23 @@
     <string name="err_cam_error">Camera error %1$d</string>
     <string name="err_cam_timeout">The camera didn\'t open in time</string>
     <string name="err_cam_session">The camera rejected this resolution; try another one</string>
-    <string name="err_no_pin">Enter the PIN that phonebridge shows on the PC</string>
+    <string name="err_no_pin">Enter the PIN that periphone shows on the PC</string>
     <string name="err_bad_host">Can\'t find the PC address \"%1$s\"</string>
-    <string name="err_no_pc_found">No PC found on the network. Is phonebridge --wifi running? A firewall on the PC must allow port 12350 (UDP and TCP).</string>
-    <string name="err_pc_no_answer">The PC at %1$s doesn\'t answer (phonebridge --wifi running? firewall allows port 12350?)</string>
-    <string name="err_relay_down">Nothing is listening on %1$s:12350. Run phonebridge --wifi on the PC.</string>
-    <string name="err_wrong_pin">Wrong PIN: use the one phonebridge shows on the PC</string>
+    <string name="err_no_pc_found">No PC found on the network. Is periphone --wifi running? A firewall on the PC must allow port 12350 (UDP and TCP).</string>
+    <string name="err_pc_no_answer">The PC at %1$s doesn\'t answer (periphone --wifi running? firewall allows port 12350?)</string>
+    <string name="err_relay_down">Nothing is listening on %1$s:12350. Run periphone --wifi on the PC.</string>
+    <string name="err_wrong_pin">Wrong PIN: use the one periphone shows on the PC</string>
     <string name="err_wrong_pin_stopped">Wrong PIN too many times, stopped trying: fix the PIN or tap Stop and Start</string>
     <string name="err_wrong_pin_wait">Wrong PIN: next try in %1$d s (fix the PIN, or tap Stop and Start)</string>
     <string name="err_pc_side_down">The PC side of this stream isn\'t running (PipeWire configs / camera receiver?)</string>
     <string name="err_pc_busy">The PC is slowing down attempts after a wrong PIN; retrying…</string>
     <string name="err_pc_restarted">The PC side restarted; reconnecting…</string>
-    <string name="err_pc_unsupported">The PC side doesn\'t understand this app version: update phonebridge on the PC</string>
+    <string name="err_pc_unsupported">The PC side doesn\'t understand this app version: update periphone on the PC</string>
     <string name="err_pc_gone">The PC stopped answering</string>
     <string name="err_bt_pick_pc">Pick the PC (paired Bluetooth device) above</string>
     <string name="err_bt_none">This phone has no Bluetooth</string>
     <string name="err_bt_off">Bluetooth is off</string>
-    <string name="err_bt_connect">Can\'t reach the PC over Bluetooth. Is phonebridge --bt running and the PC paired?</string>
+    <string name="err_bt_connect">Can\'t reach the PC over Bluetooth. Is periphone --bt running and the PC paired?</string>
     <string name="err_bt_permission">Allow \"Nearby devices\" for the app to use Bluetooth</string>
     <string name="err_cam_bt">The camera needs USB or Wi-Fi (Bluetooth is too slow for video)</string>
     <string name="err_cap_open">Can\'t capture the phone\'s sound: %1$s</string>
