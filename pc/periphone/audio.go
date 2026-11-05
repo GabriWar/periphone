@@ -86,7 +86,8 @@ func peakOf16(buf []int16) int32 {
 func openAudio() (*audio, error) {
 	c, err := pulse.NewClient(pulse.ClientApplicationName("periphone"))
 	if err != nil {
-		return nil, fmt.Errorf("can't reach the sound server (PulseAudio / PipeWire): %w", err)
+		return nil, fmt.Errorf("can't reach the sound server: needs PulseAudio, or PipeWire with its "+
+			"PulseAudio part (%s): %w", installHint("pipewire-pulse"), err)
 	}
 	a := &audio{c: c, subs: map[chan []byte]struct{}{}}
 	a.unloadLeftovers()
@@ -266,14 +267,25 @@ func (a *audio) moveInputs(from, to string) {
 	}
 }
 
-func (a *audio) close() {
+// restoreSink / restoreSource put back the defaults we replaced (and what was playing).
+func (a *audio) restoreSink() {
 	if a.setSink && a.prevSink != "" {
 		a.c.RawRequest(&proto.SetDefaultSink{SinkName: a.prevSink}, nil)
 		a.moveInputs(spkSink, a.prevSink)
 	}
+	a.setSink = false
+}
+
+func (a *audio) restoreSource() {
 	if a.setSource && a.prevSource != "" {
 		a.c.RawRequest(&proto.SetDefaultSource{SourceName: a.prevSource}, nil)
 	}
+	a.setSource = false
+}
+
+func (a *audio) close() {
+	a.restoreSink()
+	a.restoreSource()
 	if a.rec != nil {
 		a.rec.Close()
 	}

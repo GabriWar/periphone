@@ -35,6 +35,7 @@ type session struct {
 	lastSeen atomic.Int64
 	dec      *opusDec
 	cam      *io.PipeWriter
+	untrack  func()
 	done     chan struct{}
 	once     sync.Once
 }
@@ -56,9 +57,13 @@ func newSession(b *bridge, p *pending, send func([]byte) error, udp bool, label 
 		}
 	}
 	if p.role == roleCam {
+		cam, _ := b.getCam()
+		if cam == nil {
+			return nil, errors.New("camera receiver off")
+		}
 		r, w := io.Pipe()
 		s.cam = w
-		go b.cam.serve(r)
+		go cam.serve(r)
 	}
 	codec := "pcm"
 	if opus {
@@ -72,12 +77,13 @@ func newSession(b *bridge, p *pending, send func([]byte) error, udp bool, label 
 	}
 	logf("%s: %s connected (%s, %s)", label, roleNames[p.role], codec, enc)
 	b.connected(p.role, +1)
+	s.untrack = b.track(p.role, func() { s.close("turned off on the PC") })
 	return s, nil
 }
 
 // checkEncryption: this PC's setting wins; a phone asking for plain streams is refused.
 func (b *bridge) checkEncryption(p *pending, label string) error {
-	if b.opt.Encrypt && p.flags&fEncrypt == 0 {
+	if b.getOpt().Encrypt && p.flags&fEncrypt == 0 {
 		logf("%s: refused %s: the phone has encryption off, this PC requires it", label, roleNames[p.role])
 		return hsError(eUnsupported)
 	}
@@ -225,6 +231,9 @@ func (s *session) close(why string) {
 			s.dec = nil
 		}
 		s.mu.Unlock()
+		if s.untrack != nil {
+			s.untrack()
+		}
 		s.b.connected(s.role, -1)
 		logf("%s: %s disconnected (%s)", s.label, roleNames[s.role], why)
 	})

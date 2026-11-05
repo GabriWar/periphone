@@ -138,6 +138,7 @@
       <select id="camfacing"><option value="">Don't start it from here</option>
         <option value="back">Start the back camera</option><option value="front">Start the front camera</option></select>
       <div id="camwhy" class="warn hidden"></div>
+      <button id="camfix" class="primary hidden">Enable the camera (asks for your password once)</button>
     </div>
   </section>
 
@@ -150,6 +151,10 @@
         <label class="f">PIN (type it in the app: Connection › PIN)</label>
         <div class="pinrow"><span id="pin" class="pin"></span>
           <button id="copypin">Copy</button><button id="newpin">New</button></div>
+      </div>
+      <div id="fwbox" class="hidden" style="margin-top:12px">
+        <div class="hint">The phone must reach port 12350 (UDP + TCP). If it can't connect:</div>
+        <button id="fwopen" style="margin-top:6px">Open port 12350 in the firewall</button>
       </div>
       <div id="panbox" class="hidden">
         <label class="f" style="margin-top:12px">Phone to join (Bluetooth MAC; empty = the only paired device)</label>
@@ -171,7 +176,8 @@
       <select id="micmode"><option value="0">What the app has</option><option value="1">Standard</option>
         <option value="7">Voice call (echo + noise cancelling)</option><option value="9">Raw (no processing)</option>
         <option value="6">Voice recognition</option><option value="5">Camcorder</option></select>
-      <div class="hint" style="margin-top:10px">Changes restart the bridge and the app on the phone.</div>
+      <div class="hint" style="margin-top:10px">Changes apply right away; the phone gets them in the background.
+        Only switching the link restarts the bridge.</div>
     </div>
     <div style="display:flex; align-items:center; gap:12px">
       <span class="hint" style="flex:1">Closing this window keeps the bridge running (tray icon; reopen: run
@@ -214,7 +220,7 @@ function apply(change, msg) {
   Object.assign(st.opt, change);
   render();
   post("apply", o);
-  toast(msg || "Applied: restarting the bridge…");
+  toast(msg || "Applied");
 }
 
 function render() {
@@ -252,6 +258,9 @@ function render() {
   $("#camfacing").value = st.opt.camFacing || "";
   $("#camwhy").textContent = st.camWhy ? "Camera unavailable: " + st.camWhy : "";
   $("#camwhy").classList.toggle("hidden", !st.camWhy);
+  $("#camfix").classList.toggle("hidden", !st.camFix);
+  $("#fwbox").classList.toggle("hidden", !st.firewall);
+  $("#fwopen").textContent = "Open port 12350 in " + (st.firewall || "the firewall");
 
   $("#codec").value = st.opt.codec || "auto";
   $("#encrypt").checked = !!st.opt.encrypt;
@@ -280,6 +289,8 @@ $$("#links button").forEach(b => b.onclick = () => { if (b.dataset.link !== st.o
 $$("input[data-opt]").forEach(i => i.onchange = () => apply({ [i.dataset.opt]: i.checked }));
 $("#camfacing").onchange = e => apply({ camFacing: e.target.value });
 $("#codec").onchange = e => apply({ codec: e.target.value });
+$("#camfix").onclick = () => { post("camera"); toast("Asking for the password…"); };
+$("#fwopen").onclick = () => { post("firewall"); toast("Asking for the password…"); };
 $("#encrypt").onchange = e => apply({ encrypt: e.target.checked });
 $("#buffer").onchange = e => apply({ buffer: +e.target.value });
 $("#micmode").onchange = e => apply({ micMode: +e.target.value });

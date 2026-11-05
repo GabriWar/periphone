@@ -172,6 +172,16 @@ a C compiler, cmake; downloads libopus with a pinned checksum).
   without a tray). Choices are remembered (`~/.config/periphone/settings.json`).
 - **Crash-safe**: the devices it replaced as defaults are written down while it runs; if it is
   killed, the next start removes the leftover devices and puts those defaults back.
+- **Live settings**: changing streams, codec, encryption, buffer, mic mode or the camera applies
+  to the running bridge and reaches the app in the background (adb broadcast to a DUMP-protected
+  receiver): nothing restarts and the app doesn't jump to the front. Only switching the link
+  restarts the bridge.
+- **Root, once, from the window**: "Enable the camera" loads v4l2loopback and sets it to load at
+  boot (systemd `modules-load.d`, or `/etc/modules`), keeping an existing options file; "Open port
+  12350" opens ufw / firewalld for Wi-Fi. Both use polkit (`pkexec`, every major desktop), else
+  `sudo -A` if an askpass helper is set, else show the command to run.
+- **Any distro**: install hints are per distro (Arch, Debian/Ubuntu, Fedora, openSUSE); adb's
+  "no permissions" (missing udev rules) and Secure Boot refusing the module are explained.
 - **Optional, only for what needs them**: `adb` (USB, and starting the app on the phone);
   `ffmpeg` + the `v4l2loopback` kernel module (camera:
   `sudo modprobe v4l2loopback exclusive_caps=1 card_label="Phone Camera"`); BlueZ (Bluetooth);

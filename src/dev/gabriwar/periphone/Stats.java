@@ -61,6 +61,8 @@ final class Stats {
     // Wi-Fi / Bluetooth: where the PC was found, and how the last stream got there
     static volatile InetAddress pcAddr;
     static volatile String linkWhere = "";
+    // bumped when the PC changed the settings in the background: the screen re-reads them
+    static volatile int prefsPushed;
     // PIN mismatches in a row and when to try again (back-off, see Remote.wrongPin)
     static volatile int pinFails;          // in a row (back-off); a success resets it
     static volatile int pinMismatches;     // total since the user last tapped Start / changed settings

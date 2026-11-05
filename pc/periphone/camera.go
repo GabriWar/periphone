@@ -39,11 +39,14 @@ func findLoopback() string {
 
 func newCamera() (*camera, string) {
 	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		return nil, "ffmpeg not installed"
+		return nil, "ffmpeg isn't installed: " + installHint("ffmpeg")
 	}
 	d := findLoopback()
 	if d == "" {
-		return nil, `v4l2loopback not loaded: sudo modprobe v4l2loopback exclusive_caps=1 card_label="Phone Camera"`
+		if !moduleInstalled() {
+			return nil, "the webcam module (v4l2loopback) isn't installed: " + installHint("v4l2loopback")
+		}
+		return nil, "the webcam module isn't loaded: use \"Enable the camera\" (asks for your password once)"
 	}
 	return &camera{device: d}, ""
 }

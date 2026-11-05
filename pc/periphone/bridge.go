@@ -38,10 +38,15 @@ func defaultOptions() options {
 }
 
 type bridge struct {
+	mu      sync.RWMutex // opt, cam, camWhy: changed live by update / enableCamera
 	opt     options
 	au      *audio
 	cam     *camera
 	camWhy  string
+	pcHost  string // what the app was told, for later settings pushes
+	btAddr  string
+	smu     sync.Mutex
+	streams map[*streamRef]struct{} // open streams, to cut the ones switched off
 	hs      *handshaker
 	pin     string
 	adb     *adbDev
@@ -56,7 +61,7 @@ func linkLabel(l string) string {
 }
 
 func startBridge(opt options) (*bridge, error) {
-	b := &bridge{opt: opt, done: make(chan struct{})}
+	b := &bridge{opt: opt, done: make(chan struct{}), streams: map[*streamRef]struct{}{}}
 	var err error
 	if opt.Link != "usb" {
 		if b.pin, err = loadPIN(false); err != nil {
@@ -115,25 +120,124 @@ func startBridge(opt options) (*bridge, error) {
 	}
 	b.au.useAsDefaults(opt.Out, opt.Mic)
 	if b.adb != nil {
-		b.adb.startApp(b, pcHost, btAddr)
+		b.pcHost, b.btAddr = pcHost, btAddr
+		b.adb.startApp(b)
 	} else {
 		logf("on the phone: open Periphone, Connection > %s, PIN %s, tap Start", linkLabel(opt.Link), b.pin)
 	}
 	return b, nil
 }
 
+func (b *bridge) getOpt() options {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.opt
+}
+
+func (b *bridge) getCam() (*camera, string) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.cam, b.camWhy
+}
+
 func (b *bridge) wants(role byte) bool {
+	o := b.getOpt()
 	switch role {
 	case roleSpk:
-		return b.opt.Out
+		return o.Out
 	case roleMic:
-		return b.opt.Mic
+		return o.Mic
 	case roleAudio:
-		return b.opt.PhoneAudio
+		return o.PhoneAudio
 	case roleCam:
-		return b.cam != nil
+		cam, _ := b.getCam()
+		return cam != nil
 	}
 	return false
+}
+
+// streamRef: one open stream (USB connection or network session), so update can cut it.
+type streamRef struct {
+	role  byte
+	close func()
+}
+
+func (b *bridge) track(role byte, close func()) (untrack func()) {
+	r := &streamRef{role, close}
+	b.smu.Lock()
+	b.streams[r] = struct{}{}
+	b.smu.Unlock()
+	return func() {
+		b.smu.Lock()
+		delete(b.streams, r)
+		b.smu.Unlock()
+	}
+}
+
+// update applies new settings to the running bridge (same link): no restart, the app on the phone
+// gets them in the background and restarts only the streams they affect.
+func (b *bridge) update(o options) {
+	b.mu.Lock()
+	old := b.opt
+	b.opt = o
+	b.mu.Unlock()
+	if o.Out != old.Out {
+		if o.Out {
+			b.au.useAsDefaults(true, false)
+		} else {
+			b.au.restoreSink()
+		}
+	}
+	if o.Mic != old.Mic {
+		if o.Mic {
+			b.au.useAsDefaults(false, true)
+		} else {
+			b.au.restoreSource()
+		}
+	}
+	b.smu.Lock()
+	var cut []*streamRef
+	for r := range b.streams {
+		if !b.wants(r.role) {
+			cut = append(cut, r)
+		}
+	}
+	b.smu.Unlock()
+	for _, r := range cut {
+		r.close()
+	}
+	if b.adb != nil {
+		b.adb.pushSettings(b)
+	}
+	logf("settings applied")
+}
+
+// enableCamera starts the camera receiver once the webcam module is there (no restart).
+func (b *bridge) enableCamera() error {
+	if cam, _ := b.getCam(); cam != nil {
+		return nil
+	}
+	if b.getOpt().Link == "bt" {
+		return fmt.Errorf("no camera over Bluetooth direct")
+	}
+	cam, why := newCamera()
+	b.mu.Lock()
+	b.cam, b.camWhy = cam, why
+	b.mu.Unlock()
+	if cam == nil {
+		return fmt.Errorf("%s", why)
+	}
+	if b.getOpt().Link == "usb" {
+		if err := b.listenUSB(roleCam); err != nil {
+			return err
+		}
+		if b.adb != nil {
+			p := "tcp:" + strconv.Itoa(usbPorts[roleCam])
+			b.adb.cmd("reverse", p, p)
+		}
+	}
+	logf("camera: ready (%s)", cam.device)
+	return nil
 }
 
 func (b *bridge) connected(role byte, d int32) { b.conns[role].Add(d) }
@@ -155,14 +259,14 @@ func (b *bridge) close() {
 		for _, c := range b.closers {
 			c.Close()
 		}
-		if b.cam != nil {
-			b.cam.close()
+		if cam, _ := b.getCam(); cam != nil {
+			cam.close()
 		}
 		if b.au != nil {
 			b.au.close()
 		}
 		if b.adb != nil {
-			b.adb.stopApp(b.opt.Link == "usb")
+			b.adb.stopApp(b.getOpt().Link == "usb")
 		}
 	})
 }
@@ -170,25 +274,36 @@ func (b *bridge) close() {
 // ---------------------------------------------------------------- USB tunnel
 
 func (b *bridge) serveUSB() error {
-	for role, port := range usbPorts {
-		if role == roleCam && b.cam == nil {
+	for role := range usbPorts {
+		if cam, _ := b.getCam(); role == roleCam && cam == nil {
 			continue
 		}
-		l, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(port))
-		if err != nil {
-			return fmt.Errorf("port %d is taken (old periphone PipeWire configs? run: periphone install): %w", port, err)
+		if err := b.listenUSB(role); err != nil {
+			return err
 		}
-		b.closers = append(b.closers, l)
-		go func(role byte, l net.Listener) {
-			for {
-				c, err := l.Accept()
-				if err != nil {
-					return
-				}
-				go b.handleUSB(role, c)
-			}
-		}(role, l)
 	}
+	return nil
+}
+
+func (b *bridge) listenUSB(role byte) error {
+	port := usbPorts[role]
+	l, err := net.Listen("tcp4", "127.0.0.1:"+strconv.Itoa(port))
+	if err != nil {
+		return fmt.Errorf("port %d is taken (another program on it? an old phone-bridge PipeWire config? "+
+			"run: periphone install): %w", port, err)
+	}
+	b.mu.Lock()
+	b.closers = append(b.closers, l)
+	b.mu.Unlock()
+	go func() {
+		for {
+			c, err := l.Accept()
+			if err != nil {
+				return
+			}
+			go b.handleUSB(role, c)
+		}
+	}()
 	return nil
 }
 
@@ -201,6 +316,7 @@ func (b *bridge) handleUSB(role byte, c net.Conn) {
 		t.SetNoDelay(true)
 	}
 	go func() { <-b.done; c.Close() }()
+	defer b.track(role, func() { c.Close() })()
 	b.connected(role, 1)
 	defer b.connected(role, -1)
 	logf("usb: %s connected", roleNames[role])
@@ -232,7 +348,9 @@ func (b *bridge) handleUSB(role byte, c net.Conn) {
 			r.write(buf)
 		}
 	case roleCam:
-		b.cam.serve(c)
+		if cam, _ := b.getCam(); cam != nil {
+			cam.serve(c)
+		}
 	}
 }
 
@@ -243,11 +361,11 @@ type adbDev struct{ serial string }
 // findADB: the one phone adb sees (ANDROID_SERIAL picks one if there are several).
 func findADB() (*adbDev, error) {
 	if _, err := exec.LookPath("adb"); err != nil {
-		return nil, errors.New("adb not found (install android-tools); needed for USB")
+		return nil, errors.New("adb isn't installed (needed for USB): " + installHint("adb"))
 	}
 	out, _ := exec.Command("adb", "devices").Output()
 	var ok []string
-	unauthorized := false
+	unauthorized, noPerm := false, false
 	for _, line := range strings.Split(string(out), "\n")[1:] {
 		f := strings.Fields(line)
 		if len(f) == 2 && f[1] == "device" {
@@ -256,6 +374,13 @@ func findADB() (*adbDev, error) {
 		if len(f) == 2 && f[1] == "unauthorized" {
 			unauthorized = true
 		}
+		if len(f) >= 2 && strings.HasPrefix(f[1], "no") && strings.Contains(line, "permissions") {
+			noPerm = true // the USB device isn't accessible: udev rules missing
+		}
+	}
+	if noPerm && len(ok) == 0 {
+		return nil, errors.New("adb sees the phone but has no permission to use it (missing udev rules): " +
+			installHint("adb-udev"))
 	}
 	if s := os.Getenv("ANDROID_SERIAL"); s != "" {
 		for _, d := range ok {
@@ -290,7 +415,7 @@ func (d *adbDev) cmd(args ...string) error {
 
 const pkg = "dev.gabriwar.periphone"
 
-func (d *adbDev) startApp(b *bridge, pcHost, btAddr string) {
+func (d *adbDev) startApp(b *bridge) {
 	if out, _ := d.sh("pm", "path", pkg); !strings.Contains(out, "package:") {
 		logf("the app isn't installed on the phone: ./build.sh && adb install -r periphone.apk")
 		return
@@ -298,11 +423,12 @@ func (d *adbDev) startApp(b *bridge, pcHost, btAddr string) {
 	d.sh("am", "force-stop", "com.kaytat.simpleprotocolplayer") // the old player would double the stream
 	// no force-stop of the app: a running one takes the new settings (it restarts only the
 	// streams they affect); killing it looked like a crash on the phone
-	opt := b.opt
+	opt := b.getOpt()
+	cam, _ := b.getCam()
 	if opt.Link == "usb" {
 		for role, port := range usbPorts {
 			p := "tcp:" + strconv.Itoa(port)
-			if role != roleCam || b.cam != nil {
+			if role != roleCam || cam != nil {
 				d.cmd("reverse", p, p)
 			}
 		}
@@ -319,20 +445,30 @@ func (d *adbDev) startApp(b *bridge, pcHost, btAddr string) {
 	}
 	d.sh("input", "keyevent", "KEYCODE_WAKEUP")
 
+	a := append([]string{"am", "start", "-n", pkg + "/.Autostart", "--ez", "autostart", "true"},
+		settingsExtras(b, opt)...)
+	if _, err := d.sh(a...); err != nil {
+		logf("couldn't start the app over adb: %v", err)
+		return
+	}
+	logf("app started on the phone (%s)", d.serial)
+}
+
+// settingsExtras: the app's settings as am extras (see Cfg.applyExtras on the phone).
+func settingsExtras(b *bridge, opt options) []string {
 	link := map[string]string{"usb": "0", "wifi": "1", "pan": "2", "bt": "3"}[opt.Link]
 	codec := map[string]string{"auto": "0", "pcm": "1", "opus": "2"}[opt.Codec]
 	tf := func(v bool) string { return strconv.FormatBool(v) }
-	a := []string{"am", "start", "-n", pkg + "/.Autostart", "--ez", "autostart", "true",
-		"--ez", "spk", tf(opt.Out), "--ez", "mic", tf(opt.Mic), "--ez", "cap", tf(opt.PhoneAudio),
+	a := []string{"--ez", "spk", tf(opt.Out), "--ez", "mic", tf(opt.Mic), "--ez", "cap", tf(opt.PhoneAudio),
 		"--ei", "spkport", "12345", "--ei", "micport", "12346", "--ei", "camport", "12347",
 		"--ei", "link", link}
 	if opt.Link != "usb" {
 		a = append(a, "--es", "pin", b.pin, "--ez", "encrypt", tf(opt.Encrypt), "--ei", "codec", codec)
 		if opt.Link == "wifi" {
-			a = append(a, "--es", "host", pcHost)
+			a = append(a, "--es", "host", b.pcHost)
 		}
-		if btAddr != "" {
-			a = append(a, "--es", "btaddr", btAddr)
+		if b.btAddr != "" {
+			a = append(a, "--es", "btaddr", b.btAddr)
 		}
 	}
 	if opt.Buffer > 0 {
@@ -344,17 +480,25 @@ func (d *adbDev) startApp(b *bridge, pcHost, btAddr string) {
 	if opt.CamFacing != "" {
 		a = append(a, "--ez", "cam", "true", "--ez", "camfront", tf(opt.CamFacing == "front"))
 	}
-	if _, err := d.sh(a...); err != nil {
-		logf("couldn't start the app over adb: %v", err)
-		return
+	return a
+}
+
+// pushSettings hands new settings to the running app in the background (no screen switch).
+func (d *adbDev) pushSettings(b *bridge) {
+	opt := b.getOpt()
+	if opt.PhoneAudio { // lets the capture start without the screen-capture prompt, where honored
+		d.sh("appops", "set", pkg, "PROJECT_MEDIA", "allow")
 	}
-	logf("app started on the phone (%s)", d.serial)
+	a := append([]string{"am", "broadcast", "-n", pkg + "/.SettingsReceiver"}, settingsExtras(b, opt)...)
+	if _, err := d.sh(a...); err != nil {
+		logf("couldn't send the settings to the phone: %v", err)
+	}
 }
 
 // stopApp asks the app (if it runs) to stop its bridge and go to the background; no force-stop.
 func (d *adbDev) stopApp(usb bool) {
 	if out, _ := d.sh("pidof", pkg); strings.TrimSpace(out) != "" {
-		d.sh("am", "start", "-n", pkg+"/.Autostart", "--ez", "autostart", "true", "--ez", "stopbridge", "true")
+		d.sh("am", "broadcast", "-n", pkg+"/.SettingsReceiver", "--ez", "stopbridge", "true")
 	}
 	if usb {
 		for _, port := range usbPorts {
@@ -421,8 +565,7 @@ func wifiChecks(d *adbDev) {
 func firewallHint() {
 	for _, fw := range []string{"ufw", "firewalld"} {
 		if exec.Command("systemctl", "is-active", "-q", fw).Run() == nil {
-			logf("note: %s is on: if the phone can't connect, allow port %d (UDP and TCP): sudo ufw allow %d"+
-				"  or  sudo firewall-cmd --add-port=%d/udp --add-port=%d/tcp", fw, netPort, netPort, netPort, netPort)
+			logf("note: %s is on: if the phone can't connect, use \"Open port %d\" in the window", fw, netPort)
 		}
 	}
 }

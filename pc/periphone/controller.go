@@ -61,10 +61,40 @@ func (c *controller) notify() {
 // apply saves the settings and restarts the bridge with them (and the app on the phone).
 func (c *controller) apply(opt options) {
 	c.mu.Lock()
+	old, b := c.opt, c.b
 	c.opt = opt
 	c.mu.Unlock()
 	saveSettings(opt)
+	if b != nil && opt.Link == old.Link && opt.PanMAC == old.PanMAC {
+		c.life.Lock() // not while a start / stop is half done
+		if c.b == b {
+			b.update(opt) // same link: live, no restart
+			c.life.Unlock()
+			c.notify()
+			return
+		}
+		c.life.Unlock()
+	}
 	c.restart()
+}
+
+// enableCamera loads the webcam module (asks for the password once; also sets it to load at
+// boot) and turns the camera receiver on in the running bridge.
+func (c *controller) enableCamera() {
+	if err := loadCameraModule(); err != nil {
+		logf("camera: %v", err)
+		c.notify()
+		return
+	}
+	c.mu.Lock()
+	b := c.b
+	c.mu.Unlock()
+	if b != nil {
+		if err := b.enableCamera(); err != nil {
+			logf("camera: %v", err)
+		}
+	}
+	c.notify()
 }
 
 func (c *controller) restart() {
@@ -155,6 +185,8 @@ type state struct {
 	Opt      options                `json:"opt"`
 	Streams  map[string]streamState `json:"streams"`
 	CamWhy   string                 `json:"camWhy"`
+	CamFix   bool                   `json:"camFix"`   // the window can load the webcam module
+	Firewall string                 `json:"firewall"` // active firewall (ufw / firewalld), "" = none
 	PIN      string                 `json:"pin"`
 	Phone    string                 `json:"phone"` // adb serial, "" = none
 	Summary  string                 `json:"summary"`
@@ -193,12 +225,20 @@ func (c *controller) snapshot() state {
 		if b.adb != nil {
 			s.Phone = b.adb.serial
 		}
-		s.CamWhy = b.camWhy
 	}
 	add("out", roleSpk, c.opt.Out, lv[0])
 	add("mic", roleMic, c.opt.Mic, lv[1])
 	add("phoneAudio", roleAudio, c.opt.PhoneAudio, lv[2])
-	add("camera", roleCam, b != nil && b.cam != nil, 0)
+	camOn := false
+	if b != nil {
+		cam, why := b.getCam()
+		camOn, s.CamWhy = cam != nil, why
+		s.CamFix = cam == nil && canLoadCameraModule()
+	}
+	add("camera", roleCam, camOn, 0)
+	if c.opt.Link == "wifi" || c.opt.Link == "pan" {
+		s.Firewall = firewallName()
+	}
 	if cs := s.Streams["camera"]; cs.Want && !cs.On {
 		cs.Want = false // the camera is on demand: waiting isn't a problem
 		s.Streams["camera"] = cs

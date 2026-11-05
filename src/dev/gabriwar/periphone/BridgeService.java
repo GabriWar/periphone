@@ -159,7 +159,17 @@ public class BridgeService extends Service {
             if (mic != null) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE;
             if (cam != null && Build.VERSION.SDK_INT >= 30) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA;
             if (Stats.projection != null || projectionPending) types |= ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION;
-            startForeground(NOTIF_ID, n, types);
+            try {
+                startForeground(NOTIF_ID, n, types);
+            } catch (RuntimeException e) {
+                // Android 14 only lets the mic / camera start while the app is on screen; a setting
+                // the PC sent in the background can't turn them on: run without, say why
+                int plain = types & ~(ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                        | ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA);
+                startForeground(NOTIF_ID, n, plain);
+                if (mic != null) Stats.micError = getString(R.string.err_needs_foreground);
+                if (cam != null) Stats.camError = getString(R.string.err_needs_foreground);
+            }
         } else {
             startForeground(NOTIF_ID, n);
         }

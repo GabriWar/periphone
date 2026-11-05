@@ -72,6 +72,37 @@ final class Cfg {
         return p >= 1024 && p <= 65535;
     }
 
+    /** Settings sent by the PC (adb: the Autostart alias or SettingsReceiver) into the prefs. */
+    static void applyExtras(SharedPreferences.Editor e, android.content.Intent i) {
+        if (i.hasExtra("spk")) e.putBoolean(Cfg.K_SPK, i.getBooleanExtra("spk", true));
+        if (i.hasExtra("mic")) e.putBoolean(Cfg.K_MIC, i.getBooleanExtra("mic", true));
+        if (i.hasExtra("cam")) e.putBoolean(Cfg.K_CAM, i.getBooleanExtra("cam", false));
+        if (i.hasExtra("camfront")) e.putBoolean(Cfg.K_CAM_FRONT, i.getBooleanExtra("camfront", false));
+        if (i.hasExtra("camsize")) {
+            String s = i.getStringExtra("camsize");
+            if (s != null && s.matches("\\d{3,4}x\\d{3,4}")) e.putString(Cfg.K_CAM_SIZE, s);
+    }
+    if (i.hasExtra("camfps")) e.putInt(Cfg.K_CAM_FPS, Math.max(5, Math.min(60, i.getIntExtra("camfps", 30))));
+    if (i.hasExtra("buf")) e.putInt(Cfg.K_BUF, Cfg.clampBuf(i.getIntExtra("buf", Cfg.DEFAULT_BUF_MS)));
+    if (i.hasExtra("micbuf")) e.putInt(Cfg.K_MIC_BUF, Cfg.clampBuf(i.getIntExtra("micbuf", Cfg.DEFAULT_MIC_BUF_MS)));
+    if (i.hasExtra("src")) e.putInt(Cfg.K_SRC, i.getIntExtra("src", Cfg.DEFAULT_SRC));
+    if (i.hasExtra("cap")) e.putBoolean(Cfg.K_CAP, i.getBooleanExtra("cap", false));
+    if (i.hasExtra("link")) {
+        e.putInt(Cfg.K_LINK, Math.max(Cfg.LINK_USB, Math.min(Cfg.LINK_BT, i.getIntExtra("link", Cfg.LINK_USB))));
+    }
+    if (i.hasExtra("host")) e.putString(Cfg.K_HOST, String.valueOf(i.getStringExtra("host")).trim());
+    if (i.hasExtra("pin")) e.putString(Cfg.K_PIN, String.valueOf(i.getStringExtra("pin")).trim());
+    if (i.hasExtra("encrypt")) e.putBoolean(Cfg.K_ENCRYPT, i.getBooleanExtra("encrypt", true));
+    if (i.hasExtra("codec")) {
+        e.putInt(Cfg.K_CODEC, Math.max(Cfg.CODEC_AUTO, Math.min(Cfg.CODEC_OPUS, i.getIntExtra("codec", 0))));
+    }
+    if (i.hasExtra("btaddr")) e.putString(Cfg.K_BT_ADDR, String.valueOf(i.getStringExtra("btaddr")).trim());
+    int p;
+    if (Cfg.validPort(p = i.getIntExtra("spkport", -1))) e.putInt(Cfg.K_SPK_PORT, p);
+    if (Cfg.validPort(p = i.getIntExtra("micport", -1))) e.putInt(Cfg.K_MIC_PORT, p);
+    if (Cfg.validPort(p = i.getIntExtra("camport", -1))) e.putInt(Cfg.K_CAM_PORT, p);
+    }
+
     /** How the pipes reach the PC: a snapshot of the prefs, so a change restarts them. */
     static final class Link {
         final int mode;

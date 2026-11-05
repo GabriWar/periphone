@@ -161,6 +161,15 @@ func serveWeb(c *controller, quit func()) (open func(), err error) {
 	post("start", func(*http.Request) error { go c.restart(); return nil })
 	post("stop", func(*http.Request) error { go c.stop(); return nil })
 	post("pin", func(*http.Request) error { go c.newPIN(); return nil })
+	post("camera", func(*http.Request) error { go c.enableCamera(); return nil })
+	post("firewall", func(*http.Request) error {
+		go func() {
+			if err := openFirewall(); err != nil {
+				logf("firewall: %v", err)
+			}
+		}()
+		return nil
+	})
 	post("quit", func(*http.Request) error { go quit(); return nil })
 
 	srv := &http.Server{Handler: http.HandlerFunc(func(rw http.ResponseWriter, r *http.Request) {

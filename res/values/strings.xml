@@ -212,6 +212,7 @@
     <string name="err_bt_off">Bluetooth is off</string>
     <string name="err_bt_connect">Can\'t reach the PC over Bluetooth. Is periphone --bt running and the PC paired?</string>
     <string name="err_bt_permission">Allow \"Nearby devices\" for the app to use Bluetooth</string>
+    <string name="err_needs_foreground">Android only starts this with the app on screen: open Periphone once</string>
     <string name="err_cam_bt">The camera needs USB or Wi-Fi (Bluetooth is too slow for video)</string>
     <string name="err_cap_open">Can\'t capture the phone\'s sound: %1$s</string>
     <string name="err_cap_android">Capturing the phone\'s sound needs Android 10 or newer</string>
