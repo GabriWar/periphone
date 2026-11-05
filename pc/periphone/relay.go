@@ -77,7 +77,7 @@ func newSession(b *bridge, p *pending, send func([]byte) error, udp bool, label 
 	}
 	logf("%s: %s connected (%s, %s)", label, roleNames[p.role], codec, enc)
 	b.connected(p.role, +1)
-	s.untrack = b.track(p.role, func() { s.close("turned off on the PC") })
+	s.untrack = b.track(p.role, p.flags&fEncrypt == 0, func() { s.close("settings changed on the PC") })
 	return s, nil
 }
 

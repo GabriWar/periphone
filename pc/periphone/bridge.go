@@ -159,11 +159,12 @@ func (b *bridge) wants(role byte) bool {
 // streamRef: one open stream (USB connection or network session), so update can cut it.
 type streamRef struct {
 	role  byte
+	plain bool // a network stream without encryption
 	close func()
 }
 
-func (b *bridge) track(role byte, close func()) (untrack func()) {
-	r := &streamRef{role, close}
+func (b *bridge) track(role byte, plain bool, close func()) (untrack func()) {
+	r := &streamRef{role, plain, close}
 	b.smu.Lock()
 	b.streams[r] = struct{}{}
 	b.smu.Unlock()
@@ -198,7 +199,8 @@ func (b *bridge) update(o options) {
 	b.smu.Lock()
 	var cut []*streamRef
 	for r := range b.streams {
-		if !b.wants(r.role) {
+		// switched off, or encryption turned on under an unencrypted stream (it reconnects encrypted)
+		if !b.wants(r.role) || (o.Encrypt && r.plain) {
 			cut = append(cut, r)
 		}
 	}
@@ -316,7 +318,7 @@ func (b *bridge) handleUSB(role byte, c net.Conn) {
 		t.SetNoDelay(true)
 	}
 	go func() { <-b.done; c.Close() }()
-	defer b.track(role, func() { c.Close() })()
+	defer b.track(role, false, func() { c.Close() })()
 	b.connected(role, 1)
 	defer b.connected(role, -1)
 	logf("usb: %s connected", roleNames[role])
