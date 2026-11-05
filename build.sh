@@ -61,7 +61,7 @@ done
 "$BT/aapt2" compile --dir res -o "$B/res"
 "$BT/aapt2" link -o "$B/base.apk" -I "$AJ" --manifest AndroidManifest.xml \
     --min-sdk-version 26 --target-sdk-version 34 \
-    --version-code 10 --version-name 2.0 \
+    --version-code 11 --version-name 1.0.0 \
     --java "$B/gen" "$B"/res/*.flat
 
 "$JAVAC" -encoding UTF-8 --release 8 -Xlint:all,-options -cp "$AJ" -d "$B/classes" \
