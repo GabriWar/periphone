@@ -24,13 +24,29 @@ phone ══ UDP :12350 (audio, 5 ms packets) ═══╗
 Audio format is fixed: PCM S16LE 48 kHz (stereo, mono mic). Fixed on purpose: a player at the
 wrong rate pitches the audio down (48k played at 44.1k).
 
-## Quick start
+## Install
+
+From the [latest release](https://github.com/GabriWar/periphone/releases/latest):
+
+1. **Phone:** download `periphone.apk` on the phone and open it (allow installing apps from your
+   browser / files app when Android asks). Android 8+; the phone-audio stream needs Android 10+.
+2. **PC:** download the binary for your CPU (`periphone-linux-x86_64` for most PCs, `-arm64` for
+   ARM laptops and Raspberry Pi 4/5 with a 64-bit OS, `-armv7` for 32-bit ARM), then:
+   ```sh
+   chmod +x periphone-linux-x86_64 && ./periphone-linux-x86_64 install
+   periphone            # window + tray icon; pick the link there
+   ```
+   It's one static file: any distro, no dependencies to install for audio over Wi-Fi.
+   `SHA256SUMS` lists the checksums.
+3. Pick the same link in the app (Connection tab) and tap Start; with adb (USB or wireless
+   debugging) `periphone` sets the app up and starts it by itself.
+
+### From source
 
 ```sh
-pc/periphone/build.sh && pc/periphone/periphone install   # once (or grab the built binary)
-./build.sh && adb install -r periphone.apk                # the app
-periphone                                                      # window + tray; pick the link there
-periphone --wifi --no-tray                                     # or in the terminal
+pc/periphone/build.sh && pc/periphone/periphone install   # PC (Go 1.24+, a C compiler, cmake)
+./build.sh && adb install -r periphone.apk                # app (Android SDK + NDK, cmake, JDK 17+)
+pc/periphone/release.sh                                   # PC release binaries, all CPUs (needs Zig)
 ```
 
 ## Links
@@ -130,9 +146,10 @@ Builds without Gradle: Android SDK (any recent `platforms;android-NN` + `build-t
 cmake, JDK 17+. `build.sh` picks the newest installed ones and, the first time, downloads libopus
 (checksum-pinned) into `.cache/` and builds it for arm64 and armv7.
 
-`debug.keystore` (in the repo, the repo is private) signs the APK. Keep it: an APK signed with
-another key can't update the installed app (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`; the only way
-out is uninstalling, which loses the app's settings).
+Signing: `build.sh` uses the release key if `~/.config/periphone-release/release.jks` exists
+(never in the repo; `PERIPHONE_KEYS=dir` points elsewhere), else a local `debug.keystore` made on
+the first build. An APK signed with another key can't update an installed app
+(`INSTALL_FAILED_UPDATE_INCOMPATIBLE`): uninstall it first, which loses the app's settings.
 
 ### Latency and quality
 

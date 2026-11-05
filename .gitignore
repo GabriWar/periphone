@@ -2,7 +2,6 @@ build/
 ref/
 *.apk
 *.keystore
-!debug.keystore
 *.jks
 *.idsig
 .cache/

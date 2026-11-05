@@ -1,10 +1,11 @@
 package main
 
-// libopus, linked statically (build.sh builds libopus.a into .opus/).
+// libopus, linked statically: build.sh / release.sh build .opus/<GOARCH>/libopus.a (the library
+// path is in opus_<arch>.go, one per architecture).
 
 /*
 #cgo CFLAGS: -I${SRCDIR}/.opus/include
-#cgo LDFLAGS: ${SRCDIR}/.opus/libopus.a -lm
+
 #include <opus.h>
 static int set_bitrate(OpusEncoder *e, int b) { return opus_encoder_ctl(e, OPUS_SET_BITRATE(b)); }
 */

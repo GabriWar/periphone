@@ -74,11 +74,20 @@ done
 (cd "$B" && zip -q -0 base.apk lib/*/*.so)   # stored: loaded straight from the APK
 "$BT/zipalign" -f 4 "$B/base.apk" "$B/aligned.apk"
 
-[ -f debug.keystore ] || keytool -genkeypair -keystore debug.keystore \
-    -storepass android -keypass android -alias debug -keyalg RSA -keysize 2048 \
-    -validity 10000 -dname "CN=periphone" >/dev/null 2>&1
+# Signing: the release key if this machine has it (never in git; PERIPHONE_KEYS overrides where),
+# else a local debug key made on the first build (gitignored). An APK signed with another key
+# can't update an installed app: uninstall first when switching.
+REL="${PERIPHONE_KEYS:-$HOME/.config/periphone-release}"
+if [ -f "$REL/release.jks" ]; then
+    KS=(--ks "$REL/release.jks" --ks-pass "file:$REL/password")   # PKCS12: key password = store password
+    SIGNED="release key"
+else
+    [ -f debug.keystore ] || keytool -genkeypair -keystore debug.keystore \
+        -storepass android -keypass android -alias debug -keyalg RSA -keysize 2048 \
+        -validity 10000 -dname "CN=periphone" >/dev/null 2>&1
+    KS=(--ks debug.keystore --ks-pass pass:android --key-pass pass:android)
+    SIGNED="local debug key"
+fi
+"$BT/apksigner" sign "${KS[@]}" --out "$OUT" "$B/aligned.apk"
 
-"$BT/apksigner" sign --ks debug.keystore --ks-pass pass:android --key-pass pass:android \
-    --out "$OUT" "$B/aligned.apk"
-
-echo "ok: $OUT ($(stat -c %s "$OUT") bytes)"
+echo "ok: $OUT ($(stat -c %s "$OUT") bytes, $SIGNED)"
